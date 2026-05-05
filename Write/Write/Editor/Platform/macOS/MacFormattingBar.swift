@@ -26,9 +26,9 @@ struct MacFormattingBar: View {
                 BarButton(icon: "chevron.left.forwardslash.chevron.right", tooltip: "Inline Code", action: viewModel.toggleInlineCode),
             ])
         }
-        .padding(.horizontal, 6)
-        .padding(.vertical, 4)
-        .glassEffect(.regular, in: Capsule())
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var separator: some View {

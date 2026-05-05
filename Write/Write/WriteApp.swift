@@ -26,7 +26,7 @@ struct WriteApp: App {
                 window.isMovableByWindowBackground = true
                 if let contentView = window.contentView {
                     contentView.wantsLayer = true
-                    contentView.layer?.cornerRadius = 18
+                    contentView.layer?.cornerRadius = 24
                     contentView.layer?.masksToBounds = true
                 }
             }

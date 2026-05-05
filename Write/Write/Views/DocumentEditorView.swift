@@ -10,24 +10,27 @@ struct DocumentEditorView: View {
     }
 
     var body: some View {
-        ZStack(alignment: .bottom) {
-            editorView
-                .onChange(of: viewModel.text) { _, newValue in
-                    document.rawText = newValue
-                }
-
+        editorView
+            .onChange(of: viewModel.text) { _, newValue in
+                document.rawText = newValue
+            }
             #if os(macOS)
-            MacFormattingBar(viewModel: viewModel)
-                .padding(.bottom, 24)
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                VStack(spacing: 0) {
+                    Divider()
+                    MacFormattingBar(viewModel: viewModel)
+                }
+                .background {
+                    VisualEffectBackground(material: .sidebar, blendingMode: .withinWindow)
+                        .ignoresSafeArea()
+                }
+            }
+            .background {
+                VisualEffectBackground(material: .sidebar, blendingMode: .behindWindow, cornerRadius: 16)
+                    .ignoresSafeArea()
+            }
             #endif
-        }
-        #if os(macOS)
-        .background {
-            VisualEffectBackground(material: .sidebar, blendingMode: .behindWindow)
-                .ignoresSafeArea()
-        }
-        #endif
-        .focusedValue(\.editorViewModel, viewModel)
+            .focusedValue(\.editorViewModel, viewModel)
     }
 
     @ViewBuilder

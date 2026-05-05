@@ -1,6 +1,7 @@
 # Backlog
 
 ## Editor
+- Autocorrect: spelling, grammar, punctuation
 - Image embedding and inline preview
 - Table editing with column/row controls
 - SVG graphic embedding and preview
@@ -10,7 +11,12 @@
 - Find and replace
 - Word count and reading time
 - Focus mode (dim non-active paragraph)
-- Typewriter scrolling (keep cursor vertically centered)
+- Typewriter scrolling (keep cursor vertically centred)
+
+
+## Import
+- Import .md files
+- Import .docx (Word)
 
 ## Export
 - Export to .docx (Word) with native styles, captions, and figure numbers
@@ -32,7 +38,7 @@
 
 ## Platform
 - visionOS support
-- Keyboard shortcut customization
+- Keyboard shortcut customisation
 - Sidebar with document outline (heading navigation)
 - Split view for viewing two documents side by side (macOS/iPadOS)
 - Quick Open (⌘O recent file search)

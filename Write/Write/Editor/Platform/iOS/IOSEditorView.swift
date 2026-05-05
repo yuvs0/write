@@ -19,6 +19,7 @@ struct IOSEditorView: UIViewRepresentable {
         textView.delegate = context.coordinator
 
         context.coordinator.textView = textView
+        viewModel.nativeTextView = textView
         viewModel.applyHighlighting()
 
         return textView
@@ -42,17 +43,13 @@ struct IOSEditorView: UIViewRepresentable {
         func textViewDidChange(_ textView: UITextView) {
             guard !isUpdating else { return }
             isUpdating = true
-
-            let newText = textView.text ?? ""
-            viewModel.text = newText
-
-            if let textStorage = viewModel.textContentStorage.textStorage {
-                let editedRange = textView.selectedRange
-                let paragraphRange = (newText as NSString).paragraphRange(for: editedRange)
-                viewModel.highlighter.highlightRange(paragraphRange, in: textStorage)
-            }
-
+            let editedRange = textView.selectedRange
+            viewModel.handleTextChange(textView.text ?? "", editedRange: editedRange)
             isUpdating = false
+        }
+
+        func textViewDidChangeSelection(_ textView: UITextView) {
+            viewModel.savedSelectedRange = textView.selectedRange
         }
     }
 }
