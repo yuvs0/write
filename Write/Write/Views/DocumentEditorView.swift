@@ -32,7 +32,6 @@ struct DocumentEditorView: View {
                     }
                     .help("Underline")
 
-                    Divider()
 
                     Button(action: viewModel.toggleStrikethrough) {
                         Label("Strikethrough", systemImage: "strikethrough")
@@ -49,13 +48,16 @@ struct DocumentEditorView: View {
                     }
                     .help("Subscript")
 
-                    Divider()
 
                     Button(action: viewModel.toggleInlineCode) {
                         Label("Inline Code", systemImage: "chevron.left.forwardslash.chevron.right")
                     }
                     .help("Inline Code")
                 }
+            }
+            .background {
+                VisualEffectBackground()
+                    .ignoresSafeArea()
             }
             #endif
             .focusedValue(\.editorViewModel, viewModel)
