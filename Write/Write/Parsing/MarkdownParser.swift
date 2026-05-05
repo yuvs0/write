@@ -183,25 +183,30 @@ struct MarkdownParser {
         let endLine = sourceRange.upperBound.line - 1
         let endColumn = sourceRange.upperBound.column - 1
 
-        let lines = sourceText.components(separatedBy: .newlines)
+        let relevantText = sourceText.substring(from: offset) as NSString
+        let lines = relevantText.components(separatedBy: .newlines)
 
         var startLocation = offset
         for i in 0..<min(startLine, lines.count) {
-            startLocation += lines[i].count + 1
+            startLocation += lines[i].utf16.count + 1
         }
         if startLine < lines.count {
-            startLocation += min(startColumn, lines[startLine].count)
+            startLocation += min(startColumn, lines[startLine].utf16.count)
         }
 
         var endLocation = offset
         for i in 0..<min(endLine, lines.count) {
-            endLocation += lines[i].count + 1
+            endLocation += lines[i].utf16.count + 1
         }
         if endLine < lines.count {
-            endLocation += min(endColumn, lines[endLine].count)
+            endLocation += min(endColumn, lines[endLine].utf16.count)
         }
 
         let length = max(0, endLocation - startLocation)
-        return NSRange(location: startLocation, length: length)
+        let clampedLength = min(length, sourceText.length - startLocation)
+        guard startLocation >= 0, startLocation <= sourceText.length, clampedLength >= 0 else {
+            return NSRange(location: offset, length: 0)
+        }
+        return NSRange(location: startLocation, length: clampedLength)
     }
 }

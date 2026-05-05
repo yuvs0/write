@@ -30,9 +30,18 @@ final class MarkdownHighlighter: NSObject, NSTextContentStorageDelegate {
 
     func highlightRange(_ editedRange: NSRange, in textStorage: NSTextStorage) {
         let text = textStorage.string as NSString
-        let paragraphRange = text.paragraphRange(for: editedRange)
+        let totalLength = text.length
+        guard editedRange.location <= totalLength else { return }
+
+        let safeRange = NSRange(
+            location: editedRange.location,
+            length: min(editedRange.length, totalLength - editedRange.location)
+        )
+        let paragraphRange = text.paragraphRange(for: safeRange)
+        guard NSMaxRange(paragraphRange) <= totalLength else { return }
+
         let paragraphText = text.substring(with: paragraphRange)
-        let result = parser.parseRange(paragraphText, in: text, offset: paragraphRange.location)
+        let result = parser.parseRange(paragraphText, in: text as String as NSString, offset: paragraphRange.location)
 
         textStorage.beginEditing()
         textStorage.setAttributes(
@@ -40,7 +49,7 @@ final class MarkdownHighlighter: NSObject, NSTextContentStorageDelegate {
             range: paragraphRange
         )
         for node in result.nodes {
-            renderer.applyBlock(node, to: textStorage)
+            renderer.safeApplyBlock(node, to: textStorage)
         }
         renderer.applyDelimiters(result.delimiterRanges, to: textStorage)
         textStorage.endEditing()

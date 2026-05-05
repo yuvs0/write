@@ -3,8 +3,11 @@ import AppKit
 import SwiftUI
 
 final class WriteTextView: NSTextView {
+    var onPaste: (() -> Void)?
+
     override func paste(_ sender: Any?) {
         pasteAsPlainText(sender)
+        onPaste?()
     }
 }
 
@@ -34,6 +37,10 @@ struct MacEditorView: NSViewRepresentable {
         textView.delegate = context.coordinator
 
         scrollView.documentView = textView
+
+        textView.onPaste = { [weak viewModel] in
+            viewModel?.applyHighlighting()
+        }
 
         context.coordinator.textView = textView
         viewModel.nativeTextView = textView

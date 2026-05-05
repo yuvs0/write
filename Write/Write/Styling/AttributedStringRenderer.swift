@@ -39,8 +39,10 @@ struct AttributedStringRenderer {
     }
 
     func applyBlock(_ node: MarkdownNode, to attributedString: NSMutableAttributedString) {
+        let len = attributedString.length
         switch node {
         case .heading(let level, let content, let range):
+            guard NSMaxRange(range) <= len else { return }
             let style = configuration.styleForHeading(level: level)
             attributedString.addAttributes(attributes(for: style), range: range)
             for inline in content {
@@ -48,12 +50,14 @@ struct AttributedStringRenderer {
             }
 
         case .paragraph(let content, let range):
+            guard NSMaxRange(range) <= len else { return }
             attributedString.addAttributes(attributes(for: configuration.paragraph), range: range)
             for inline in content {
                 applyInline(inline, to: attributedString, baseStyle: configuration.paragraph)
             }
 
         case .blockquote(let content, let range):
+            guard NSMaxRange(range) <= len else { return }
             let style = configuration.blockquote
             var attrs = attributes(for: style)
             let paragraphStyle = NSMutableParagraphStyle()
@@ -68,9 +72,11 @@ struct AttributedStringRenderer {
             }
 
         case .codeBlock(_, _, let range):
+            guard NSMaxRange(range) <= len else { return }
             attributedString.addAttributes(attributes(for: configuration.code), range: range)
 
         case .listItem(_, let content, let range):
+            guard NSMaxRange(range) <= len else { return }
             var attrs = attributes(for: configuration.paragraph)
             let paragraphStyle = NSMutableParagraphStyle()
             paragraphStyle.headIndent = 24
@@ -88,12 +94,18 @@ struct AttributedStringRenderer {
         }
     }
 
+    func safeApplyBlock(_ node: MarkdownNode, to attributedString: NSMutableAttributedString) {
+        applyBlock(node, to: attributedString)
+    }
+
     func applyInline(_ node: InlineNode, to attributedString: NSMutableAttributedString, baseStyle: ElementStyle) {
+        let len = attributedString.length
         switch node {
         case .text:
             break
 
         case .strong(let children, let range):
+            guard NSMaxRange(range) <= len else { return }
             let modifier = configuration.bold
             let weight = modifier.fontWeightOverride ?? baseStyle.fontWeight
             let family = modifier.fontFamilyOverride ?? baseStyle.fontFamily
@@ -105,6 +117,7 @@ struct AttributedStringRenderer {
             }
 
         case .emphasis(let children, let range):
+            guard NSMaxRange(range) <= len else { return }
             let modifier = configuration.italic
             let weight = modifier.fontWeightOverride ?? baseStyle.fontWeight
             let family = modifier.fontFamilyOverride ?? baseStyle.fontFamily
@@ -116,12 +129,14 @@ struct AttributedStringRenderer {
             }
 
         case .strikethrough(let children, let range):
+            guard NSMaxRange(range) <= len else { return }
             attributedString.addAttribute(.strikethroughStyle, value: NSUnderlineStyle.single.rawValue, range: range)
             for child in children {
                 applyInline(child, to: attributedString, baseStyle: baseStyle)
             }
 
         case .inlineCode(_, let range):
+            guard NSMaxRange(range) <= len else { return }
             let font = resolveFont(
                 family: configuration.code.fontFamily,
                 weight: configuration.code.fontWeight,
@@ -131,6 +146,7 @@ struct AttributedStringRenderer {
             attributedString.addAttribute(.font, value: font, range: range)
 
         case .link(_, let children, let range):
+            guard NSMaxRange(range) <= len else { return }
             attributedString.addAttribute(.foregroundColor, value: NativeColor.systemBlue, range: range)
             attributedString.addAttribute(.underlineStyle, value: NSUnderlineStyle.single.rawValue, range: range)
             for child in children {
