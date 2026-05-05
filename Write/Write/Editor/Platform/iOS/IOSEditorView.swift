@@ -9,8 +9,9 @@ struct IOSEditorView: UIViewRepresentable {
         let textView = UITextView(frame: .zero, textContainer: viewModel.textContainer)
         textView.isEditable = true
         textView.isSelectable = true
-        textView.backgroundColor = .systemBackground
+        textView.backgroundColor = .clear
         textView.textContainerInset = UIEdgeInsets(top: 24, left: 16, bottom: 24, right: 16)
+        textView.contentInsetAdjustmentBehavior = .automatic
         textView.font = UIFont.preferredFont(forTextStyle: .body)
         textView.autocorrectionType = .default
         textView.autocapitalizationType = .sentences

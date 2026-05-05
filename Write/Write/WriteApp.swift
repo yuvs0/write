@@ -20,6 +20,7 @@ struct WriteApp: App {
             for window in NSApplication.shared.windows {
                 window.isOpaque = false
                 window.backgroundColor = .clear
+                window.titlebarAppearsTransparent = true
             }
         }
     }
