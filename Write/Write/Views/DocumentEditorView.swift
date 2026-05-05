@@ -11,10 +11,12 @@ struct DocumentEditorView: View {
 
     var body: some View {
         editorView
+            #if os(macOS)
             .background {
                 VisualEffectBackground()
                     .ignoresSafeArea()
             }
+            #endif
             .onChange(of: viewModel.text) { _, newValue in
                 document.rawText = newValue
             }
