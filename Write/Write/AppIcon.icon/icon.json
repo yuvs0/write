@@ -1,6 +1,19 @@
 {
   "fill" : {
-    "automatic-gradient" : "srgb:0.88982,0.88982,0.88982,1.00000"
+    "linear-gradient" : [
+      "srgb:0.00000,0.82414,1.00000,1.00000",
+      "extended-srgb:0.00000,0.53333,1.00000,1.00000"
+    ],
+    "orientation" : {
+      "start" : {
+        "x" : 0.5,
+        "y" : 0
+      },
+      "stop" : {
+        "x" : 0.5,
+        "y" : 0.7
+      }
+    }
   },
   "groups" : [
     {
@@ -11,7 +24,7 @@
           "fill-specializations" : [
             {
               "value" : {
-                "automatic-gradient" : "extended-gray:0.00000,1.00000",
+                "automatic-gradient" : "extended-gray:1.00000,1.00000",
                 "orientation" : {
                   "start" : {
                     "x" : 0.5,
@@ -68,6 +81,7 @@
           }
         }
       ],
+      "opacity" : 0.6,
       "position" : {
         "scale" : 1.1,
         "translation-in-points" : [
@@ -81,7 +95,7 @@
       },
       "translucency" : {
         "enabled" : true,
-        "value" : 1
+        "value" : 0.5
       }
     },
     {
@@ -90,7 +104,7 @@
           "fill-specializations" : [
             {
               "value" : {
-                "automatic-gradient" : "extended-srgb:0.00000,0.75294,0.90980,1.00000"
+                "automatic-gradient" : "extended-gray:1.00000,1.00000"
               }
             },
             {
@@ -111,13 +125,14 @@
           }
         }
       ],
+      "opacity" : 0.6,
       "shadow" : {
         "kind" : "layer-color",
         "opacity" : 0.75
       },
       "translucency" : {
         "enabled" : true,
-        "value" : 1
+        "value" : 0.5
       }
     }
   ],
