@@ -15,19 +15,47 @@ struct DocumentEditorView: View {
                 document.rawText = newValue
             }
             #if os(macOS)
-            .safeAreaInset(edge: .bottom, spacing: 0) {
-                VStack(spacing: 0) {
+            .toolbar {
+                ToolbarItemGroup(placement: .automatic) {
+                    Button(action: viewModel.toggleBold) {
+                        Label("Bold", systemImage: "bold")
+                    }
+                    .help("Bold (⌘B)")
+
+                    Button(action: viewModel.toggleItalic) {
+                        Label("Italic", systemImage: "italic")
+                    }
+                    .help("Italic (⌘I)")
+
+                    Button(action: viewModel.toggleUnderline) {
+                        Label("Underline", systemImage: "underline")
+                    }
+                    .help("Underline")
+
                     Divider()
-                    MacFormattingBar(viewModel: viewModel)
+
+                    Button(action: viewModel.toggleStrikethrough) {
+                        Label("Strikethrough", systemImage: "strikethrough")
+                    }
+                    .help("Strikethrough")
+
+                    Button(action: viewModel.toggleSuperscript) {
+                        Label("Superscript", systemImage: "textformat.superscript")
+                    }
+                    .help("Superscript")
+
+                    Button(action: viewModel.toggleSubscript) {
+                        Label("Subscript", systemImage: "textformat.subscript")
+                    }
+                    .help("Subscript")
+
+                    Divider()
+
+                    Button(action: viewModel.toggleInlineCode) {
+                        Label("Inline Code", systemImage: "chevron.left.forwardslash.chevron.right")
+                    }
+                    .help("Inline Code")
                 }
-                .background {
-                    VisualEffectBackground(material: .sidebar, blendingMode: .withinWindow)
-                        .ignoresSafeArea()
-                }
-            }
-            .background {
-                VisualEffectBackground(material: .sidebar, blendingMode: .behindWindow, cornerRadius: 16)
-                    .ignoresSafeArea()
             }
             #endif
             .focusedValue(\.editorViewModel, viewModel)
