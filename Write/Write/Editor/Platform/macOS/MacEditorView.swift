@@ -33,6 +33,7 @@ struct MacEditorView: NSViewRepresentable {
         textView.textContainerInset = NSSize(width: 20, height: 20)
         textView.isVerticallyResizable = true
         textView.isHorizontallyResizable = false
+        textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
         textView.autoresizingMask = [.width]
         textView.delegate = context.coordinator
 
