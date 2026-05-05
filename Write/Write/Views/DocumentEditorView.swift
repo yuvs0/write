@@ -11,6 +11,7 @@ struct DocumentEditorView: View {
 
     var body: some View {
         editorView
+            .background(.regularMaterial, ignoresSafeAreaEdges: .all)
             .onChange(of: viewModel.text) { _, newValue in
                 document.rawText = newValue
             }
@@ -20,10 +21,6 @@ struct DocumentEditorView: View {
                     CollapsibleToolbar(viewModel: viewModel)
                 }
             }
-            .background {
-                VisualEffectBackground()
-                    .ignoresSafeArea()
-            }
             #endif
             .focusedValue(\.editorViewModel, viewModel)
     }
@@ -32,8 +29,10 @@ struct DocumentEditorView: View {
     private var editorView: some View {
         #if os(macOS)
         MacEditorView(viewModel: viewModel)
+            .ignoresSafeArea()
         #else
         IOSEditorView(viewModel: viewModel)
+            .ignoresSafeArea()
         #endif
     }
 }
