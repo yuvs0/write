@@ -5,26 +5,12 @@ struct WriteApp: App {
     var body: some Scene {
         DocumentGroup(newDocument: MarkdownDocument()) { file in
             DocumentEditorView(document: file.$document)
-                #if os(macOS)
-                .onAppear { configureWindow() }
-                #endif
         }
         #if os(macOS)
         .commands { ZoomCommands() }
         #endif
     }
 
-    #if os(macOS)
-    private func configureWindow() {
-        DispatchQueue.main.async {
-            for window in NSApplication.shared.windows {
-                window.isOpaque = false
-                window.backgroundColor = .clear
-                window.titlebarAppearsTransparent = true
-            }
-        }
-    }
-    #endif
 }
 
 #if os(macOS)
