@@ -1,9 +1,6 @@
 {
   "fill" : {
-    "linear-gradient" : [
-      "srgb:0.00000,0.82414,1.00000,1.00000",
-      "extended-srgb:0.00000,0.53333,1.00000,1.00000"
-    ],
+    "automatic-gradient" : "extended-srgb:0.00000,0.53333,1.00000,1.00000",
     "orientation" : {
       "start" : {
         "x" : 0.5,
@@ -18,7 +15,7 @@
   "groups" : [
     {
       "blend-mode" : "normal",
-      "blur-material" : 0.1,
+      "blur-material" : 0.4,
       "layers" : [
         {
           "fill-specializations" : [
@@ -81,12 +78,24 @@
           }
         }
       ],
-      "opacity" : 0.6,
+      "opacity-specializations" : [
+        {
+          "value" : 0.67
+        },
+        {
+          "appearance" : "dark",
+          "value" : 0.77
+        },
+        {
+          "appearance" : "tinted",
+          "value" : 1
+        }
+      ],
       "position" : {
-        "scale" : 1.1,
+        "scale" : 1.2,
         "translation-in-points" : [
-          0,
-          0
+          -32,
+          64
         ]
       },
       "shadow" : {
@@ -95,7 +104,7 @@
       },
       "translucency" : {
         "enabled" : true,
-        "value" : 0.5
+        "value" : 0.79
       }
     },
     {
@@ -108,6 +117,12 @@
               }
             },
             {
+              "appearance" : "dark",
+              "value" : {
+                "automatic-gradient" : "extended-srgb:0.00000,0.53333,1.00000,1.00000"
+              }
+            },
+            {
               "appearance" : "tinted",
               "value" : {
                 "automatic-gradient" : "extended-gray:0.25000,1.00000"
@@ -117,22 +132,35 @@
           "image-name" : "1 – Layer.svg",
           "name" : "1 – Layer",
           "position" : {
-            "scale" : 1,
+            "scale" : 1.2,
             "translation-in-points" : [
               0,
-              128
+              256
             ]
           }
         }
       ],
-      "opacity" : 0.6,
+      "lighting" : "individual",
+      "opacity-specializations" : [
+        {
+          "value" : 0.57
+        },
+        {
+          "appearance" : "dark",
+          "value" : 1
+        },
+        {
+          "appearance" : "tinted",
+          "value" : 1
+        }
+      ],
       "shadow" : {
         "kind" : "layer-color",
         "opacity" : 0.75
       },
       "translucency" : {
         "enabled" : true,
-        "value" : 0.5
+        "value" : 0.94
       }
     }
   ],
