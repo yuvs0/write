@@ -43,28 +43,67 @@ struct CollapsibleToolbar: View {
 
     private var formattingButtons: some View {
         HStack(spacing: 4) {
-            button("bold", "Bold (⌘B)", viewModel.toggleBold)
-            button("italic", "Italic (⌘I)", viewModel.toggleItalic)
-            button("underline", "Underline", viewModel.toggleUnderline)
+            styleMenu
 
             Divider().frame(height: 16)
 
-            button("strikethrough", "Strikethrough", viewModel.toggleStrikethrough)
-            button("textformat.superscript", "Superscript", viewModel.toggleSuperscript)
-            button("textformat.subscript", "Subscript", viewModel.toggleSubscript)
+            button("bold", "Bold (⌘B)", .bold, viewModel.toggleBold)
+            button("italic", "Italic (⌘I)", .italic, viewModel.toggleItalic)
+            button("underline", "Underline (⌘U)", .underline, viewModel.toggleUnderline)
 
             Divider().frame(height: 16)
 
-            button("chevron.left.forwardslash.chevron.right", "Inline Code", viewModel.toggleInlineCode)
+            button("strikethrough", "Strikethrough", .strikethrough, viewModel.toggleStrikethrough)
+            button("textformat.superscript", "Superscript", .superscript, viewModel.toggleSuperscript)
+            button("textformat.subscript", "Subscript", .subscriptText, viewModel.toggleSubscript)
+
+            Divider().frame(height: 16)
+
+            button(
+                "chevron.left.forwardslash.chevron.right", "Inline Code (⌘E)",
+                .code, viewModel.toggleInlineCode
+            )
         }
         .padding(.horizontal, 4)
     }
 
-    private func button(_ icon: String, _ tooltip: String, _ action: @escaping () -> Void) -> some View {
-        Button(action: action) {
+    private var styleMenu: some View {
+        Menu {
+            ForEach(BlockStyle.menuStyles, id: \.self) { style in
+                Toggle(
+                    style.displayName,
+                    isOn: Binding(
+                        get: { viewModel.activeBlockStyle == style },
+                        set: { _ in viewModel.setBlockStyle(style) }
+                    )
+                )
+            }
+        } label: {
+            Text(viewModel.activeBlockStyle.displayName)
+                .font(.system(size: 12, weight: .medium))
+                .lineLimit(1)
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .help("Paragraph style")
+    }
+
+    private func button(
+        _ icon: String,
+        _ tooltip: String,
+        _ trait: InlineTraits,
+        _ action: @escaping () -> Void
+    ) -> some View {
+        let isActive = viewModel.activeTraits.contains(trait)
+        return Button(action: action) {
             Image(systemName: icon)
-                .font(.system(size: 12, weight: .regular))
+                .font(.system(size: 12, weight: isActive ? .semibold : .regular))
+                .foregroundStyle(isActive ? Color.accentColor : Color.primary)
                 .frame(width: 28, height: 24)
+                .background(
+                    RoundedRectangle(cornerRadius: 6)
+                        .fill(isActive ? Color.accentColor.opacity(0.15) : Color.clear)
+                )
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)

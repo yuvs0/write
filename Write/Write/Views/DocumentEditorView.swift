@@ -1,12 +1,17 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct DocumentEditorView: View {
     @Binding var document: MarkdownDocument
-    @State private var viewModel: EditorViewModel
+    var fileURL: URL?
 
-    init(document: Binding<MarkdownDocument>) {
+    @State private var viewModel: EditorViewModel
+    @State private var showsSettings = false
+
+    init(document: Binding<MarkdownDocument>, fileURL: URL? = nil) {
         self._document = document
-        self._viewModel = State(initialValue: EditorViewModel(text: document.wrappedValue.rawText))
+        self.fileURL = fileURL
+        self._viewModel = State(initialValue: EditorViewModel(markdown: document.wrappedValue.rawText))
     }
 
     var body: some View {
@@ -17,17 +22,50 @@ struct DocumentEditorView: View {
                     .ignoresSafeArea()
             }
             #endif
-            .onChange(of: viewModel.text) { _, newValue in
+            .onChange(of: viewModel.markdown) { _, newValue in
                 document.rawText = newValue
             }
-            #if os(macOS)
+            .onChange(of: viewModel.styleStore.configuration) {
+                viewModel.refreshStyle()
+            }
             .toolbar {
+                #if os(macOS)
                 ToolbarItem(placement: .primaryAction) {
                     CollapsibleToolbar(viewModel: viewModel)
                 }
+                #else
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        showsSettings = true
+                    } label: {
+                        Label("Style Settings", systemImage: "textformat.alt")
+                    }
+                }
+                #endif
+            }
+            #if os(iOS)
+            .sheet(isPresented: $showsSettings) {
+                NavigationStack {
+                    StyleSettingsView()
+                        .navigationTitle("Text Styles")
+                        .navigationBarTitleDisplayMode(.inline)
+                        .toolbar {
+                            ToolbarItem(placement: .confirmationAction) {
+                                Button("Done") { showsSettings = false }
+                            }
+                        }
+                }
             }
             #endif
-            .focusedValue(\.editorViewModel, viewModel)
+            .fileExporter(
+                isPresented: exportPresented,
+                document: exportedFile,
+                contentType: viewModel.pendingExport == .docx ? .docx : .pdf,
+                defaultFilename: exportFilename
+            ) { _ in
+                viewModel.pendingExport = nil
+            }
+            .focusedSceneValue(\.editorViewModel, viewModel)
     }
 
     @ViewBuilder
@@ -39,5 +77,28 @@ struct DocumentEditorView: View {
         IOSEditorView(viewModel: viewModel)
             .ignoresSafeArea()
         #endif
+    }
+
+    private var exportPresented: Binding<Bool> {
+        Binding(
+            get: { viewModel.pendingExport != nil },
+            set: { presented in
+                if !presented { viewModel.pendingExport = nil }
+            }
+        )
+    }
+
+    private var exportedFile: ExportedFile? {
+        guard let format = viewModel.pendingExport,
+              let data = viewModel.exportData(for: format) else { return nil }
+        return ExportedFile(data: data)
+    }
+
+    private var exportFilename: String {
+        let base = fileURL?.deletingPathExtension().lastPathComponent ?? "Untitled"
+        switch viewModel.pendingExport {
+        case .docx: return base + ".docx"
+        default: return base + ".pdf"
+        }
     }
 }

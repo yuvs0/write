@@ -2,26 +2,71 @@
 import UIKit
 import SwiftUI
 
+final class WriteUITextView: UITextView {
+    var viewModel: EditorViewModel?
+
+    /// Width of the text column; margins grow beyond this on wide layouts.
+    static let columnWidth: CGFloat = 680
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        let minimumMargin: CGFloat = traitCollection.userInterfaceIdiom == .pad ? 56 : 20
+        let margin = max(minimumMargin, (bounds.width - Self.columnWidth) / 2).rounded()
+        let insets = UIEdgeInsets(top: 24, left: margin, bottom: 24, right: margin)
+        if textContainerInset != insets {
+            textContainerInset = insets
+        }
+    }
+
+    override func paste(_ sender: Any?) {
+        guard let plainText = UIPasteboard.general.string else {
+            super.paste(sender)
+            return
+        }
+        insertText(plainText)
+    }
+
+    override func toggleBoldface(_ sender: Any?) {
+        viewModel?.toggleBold()
+    }
+
+    override func toggleItalics(_ sender: Any?) {
+        viewModel?.toggleItalic()
+    }
+
+    override func toggleUnderline(_ sender: Any?) {
+        viewModel?.toggleUnderline()
+    }
+}
+
 struct IOSEditorView: UIViewRepresentable {
     @Bindable var viewModel: EditorViewModel
 
     func makeUIView(context: Context) -> UITextView {
-        let textView = UITextView(frame: .zero, textContainer: viewModel.textContainer)
+        let textView = WriteUITextView(frame: .zero, textContainer: viewModel.textContainer)
+        textView.viewModel = viewModel
         textView.isEditable = true
         textView.isSelectable = true
         textView.backgroundColor = .clear
-        textView.textContainerInset = UIEdgeInsets(top: 24, left: 16, bottom: 24, right: 16)
+        textView.textContainerInset = UIEdgeInsets(top: 24, left: 20, bottom: 24, right: 20)
         textView.contentInsetAdjustmentBehavior = .automatic
-        textView.font = UIFont.preferredFont(forTextStyle: .body)
+        textView.keyboardDismissMode = .interactive
+        textView.alwaysBounceVertical = true
         textView.autocorrectionType = .default
         textView.autocapitalizationType = .sentences
-        textView.smartQuotesType = .no
-        textView.smartDashesType = .no
+        textView.smartQuotesType = .yes
+        textView.smartDashesType = .yes
+        textView.allowsEditingTextAttributes = false
         textView.delegate = context.coordinator
+
+        textView.inputAccessoryView = FormattingAccessoryBar.make(viewModel: viewModel)
+
+        let handle = IOSParagraphHandleController(viewModel: viewModel, textView: textView)
+        context.coordinator.handleController = handle
 
         context.coordinator.textView = textView
         viewModel.nativeTextView = textView
-        viewModel.applyHighlighting()
+        viewModel.refreshStyle()
 
         return textView
     }
@@ -35,22 +80,40 @@ struct IOSEditorView: UIViewRepresentable {
     final class Coordinator: NSObject, UITextViewDelegate {
         let viewModel: EditorViewModel
         weak var textView: UITextView?
+        var handleController: IOSParagraphHandleController?
         private var isUpdating = false
+        private var lastEditInsertedNewline = false
 
         init(viewModel: EditorViewModel) {
             self.viewModel = viewModel
         }
 
+        func textView(
+            _ textView: UITextView,
+            shouldChangeTextIn range: NSRange,
+            replacementText text: String
+        ) -> Bool {
+            if text == "\n", viewModel.handleReturnKey() {
+                return false
+            }
+            lastEditInsertedNewline = text.contains("\n")
+            return true
+        }
+
         func textViewDidChange(_ textView: UITextView) {
             guard !isUpdating else { return }
             isUpdating = true
-            let editedRange = textView.selectedRange
-            viewModel.handleTextChange(textView.text ?? "", editedRange: editedRange)
+            viewModel.handleTextChange(
+                editedRange: textView.selectedRange,
+                insertedNewline: lastEditInsertedNewline
+            )
+            lastEditInsertedNewline = false
             isUpdating = false
+            handleController?.hide()
         }
 
         func textViewDidChangeSelection(_ textView: UITextView) {
-            viewModel.savedSelectedRange = textView.selectedRange
+            viewModel.selectionDidChange(textView.selectedRange)
         }
     }
 }
