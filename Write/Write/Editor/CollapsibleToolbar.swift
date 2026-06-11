@@ -1,21 +1,21 @@
-#if os(macOS)
 import SwiftUI
 
-/// Floating formatting bar, layered over the editor (not inside the window
-/// toolbar — toolbar items get their own Liquid Glass on macOS 26, which
-/// would double-wrap ours and fight the expansion animation).
+/// Floating formatting bar, layered over the editor on macOS and iPadOS
+/// (not inside the window toolbar — toolbar items get their own Liquid
+/// Glass, which would double-wrap ours and fight the expansion animation).
 ///
 /// The collapsed glyph and expanded bar share a `glassEffectID` inside one
 /// `GlassEffectContainer`, so the system performs the Liquid Glass morph
-/// between the two shapes. Hover tracking lives on the container, which is
-/// never replaced, so the hover region stays stable while the branches swap.
+/// between the two shapes. It expands on pointer hover or tap, and lingers
+/// for a grace period before collapsing so it doesn't vanish mid-use.
 struct CollapsibleToolbar: View {
     @Bindable var viewModel: EditorViewModel
     @State private var isExpanded = false
     @State private var collapseTask: Task<Void, Never>?
     @Namespace private var glassNamespace
 
-    /// How long the bar stays expanded after the pointer leaves.
+    /// How long the bar stays expanded after the pointer leaves or a
+    /// touch interaction ends.
     private static let collapseGracePeriod: Duration = .seconds(10)
 
     var body: some View {
@@ -23,35 +23,50 @@ struct CollapsibleToolbar: View {
             if isExpanded {
                 formattingButtons
                     .padding(.horizontal, 12)
-                    .padding(.vertical, 6)
+                    .padding(.vertical, 5)
                     .glassEffect(.regular, in: .capsule)
                     .glassEffectID("formatting", in: glassNamespace)
             } else {
-                Image(systemName: "textformat")
-                    .font(.system(size: 13, weight: .medium))
-                    .frame(width: 34, height: 34)
-                    .contentShape(.circle)
-                    .glassEffect(.regular.interactive(), in: .circle)
-                    .glassEffectID("formatting", in: glassNamespace)
+                Button {
+                    expand()
+                } label: {
+                    Image(systemName: "textformat")
+                        .font(.system(size: 13, weight: .medium))
+                        .frame(width: 34, height: 34)
+                        .contentShape(.circle)
+                }
+                .buttonStyle(.plain)
+                .glassEffect(.regular.interactive(), in: .circle)
+                .glassEffectID("formatting", in: glassNamespace)
             }
         }
         .onHover { hovering in
-            collapseTask?.cancel()
-            collapseTask = nil
             if hovering {
-                withAnimation(.smooth(duration: 0.3)) {
-                    isExpanded = true
-                }
+                expand()
             } else {
-                // Linger so the bar doesn't vanish the moment the pointer
-                // slips out; hovering back in cancels the collapse.
-                collapseTask = Task { @MainActor in
-                    try? await Task.sleep(for: Self.collapseGracePeriod)
-                    guard !Task.isCancelled else { return }
-                    withAnimation(.smooth(duration: 0.3)) {
-                        isExpanded = false
-                    }
-                }
+                scheduleCollapse()
+            }
+        }
+    }
+
+    private func expand() {
+        collapseTask?.cancel()
+        collapseTask = nil
+        withAnimation(.smooth(duration: 0.3)) {
+            isExpanded = true
+        }
+        // Touch-only use has no hover-exit to schedule the collapse.
+        scheduleCollapse()
+    }
+
+    /// Restarts the linger countdown; hovering or interacting again resets it.
+    private func scheduleCollapse() {
+        collapseTask?.cancel()
+        collapseTask = Task { @MainActor in
+            try? await Task.sleep(for: Self.collapseGracePeriod)
+            guard !Task.isCancelled else { return }
+            withAnimation(.smooth(duration: 0.3)) {
+                isExpanded = false
             }
         }
     }
@@ -84,23 +99,44 @@ struct CollapsibleToolbar: View {
 
     private var styleMenu: some View {
         Menu {
-            ForEach(BlockStyle.menuStyles, id: \.self) { style in
-                Toggle(
-                    style.displayName,
-                    isOn: Binding(
-                        get: { viewModel.activeBlockStyle == style },
-                        set: { _ in viewModel.setBlockStyle(style) }
-                    )
-                )
+            ForEach(Array(BlockStyle.menuSections.enumerated()), id: \.offset) { sectionIndex, section in
+                Section {
+                    ForEach(section, id: \.self) { style in
+                        styleToggle(style)
+                    }
+                    if sectionIndex == 0 {
+                        Menu("More Headings") {
+                            ForEach(BlockStyle.moreHeadings, id: \.self) { style in
+                                styleToggle(style)
+                            }
+                        }
+                    }
+                }
             }
         } label: {
             Text(viewModel.activeBlockStyle.displayName)
                 .font(.system(size: 12, weight: .medium))
                 .lineLimit(1)
+                .padding(.horizontal, 2)
         }
+        #if os(macOS)
         .menuStyle(.borderlessButton)
+        #endif
         .fixedSize()
         .help("Paragraph style")
+    }
+
+    private func styleToggle(_ style: BlockStyle) -> some View {
+        Toggle(
+            style.displayName,
+            isOn: Binding(
+                get: { viewModel.activeBlockStyle == style },
+                set: { _ in
+                    viewModel.setBlockStyle(style)
+                    scheduleCollapse()
+                }
+            )
+        )
     }
 
     private func button(
@@ -110,7 +146,10 @@ struct CollapsibleToolbar: View {
         _ action: @escaping () -> Void
     ) -> some View {
         let isActive = viewModel.activeTraits.contains(trait)
-        return Button(action: action) {
+        return Button {
+            action()
+            scheduleCollapse()
+        } label: {
             Image(systemName: icon)
                 .font(.system(size: 12, weight: isActive ? .semibold : .regular))
                 .foregroundStyle(isActive ? Color.accentColor : Color.primary)
@@ -125,4 +164,3 @@ struct CollapsibleToolbar: View {
         .help(tooltip)
     }
 }
-#endif

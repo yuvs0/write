@@ -67,14 +67,17 @@ private struct FormattingBarContent: View {
 
     private var styleMenu: some View {
         Menu {
-            ForEach(BlockStyle.menuStyles, id: \.self) { style in
-                Button {
-                    viewModel.setBlockStyle(style)
-                } label: {
-                    if style == viewModel.activeBlockStyle {
-                        Label(style.displayName, systemImage: "checkmark")
-                    } else {
-                        Text(style.displayName)
+            ForEach(Array(BlockStyle.menuSections.enumerated()), id: \.offset) { sectionIndex, section in
+                Section {
+                    ForEach(section, id: \.self) { style in
+                        styleButton(style)
+                    }
+                    if sectionIndex == 0 {
+                        Menu("More Headings") {
+                            ForEach(BlockStyle.moreHeadings, id: \.self) { style in
+                                styleButton(style)
+                            }
+                        }
                     }
                 }
             }
@@ -91,6 +94,18 @@ private struct FormattingBarContent: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+    }
+
+    private func styleButton(_ style: BlockStyle) -> some View {
+        Button {
+            viewModel.setBlockStyle(style)
+        } label: {
+            if style == viewModel.activeBlockStyle {
+                Label(style.displayName, systemImage: "checkmark")
+            } else {
+                Text(style.displayName)
+            }
+        }
     }
 
     private func traitButton(

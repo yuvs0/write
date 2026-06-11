@@ -1,5 +1,8 @@
 import SwiftUI
 import UniformTypeIdentifiers
+#if os(iOS)
+import UIKit
+#endif
 
 struct DocumentEditorView: View {
     @Binding var document: MarkdownDocument
@@ -15,35 +18,13 @@ struct DocumentEditorView: View {
     }
 
     var body: some View {
-        editorView
-            #if os(macOS)
-            .background {
-                VisualEffectBackground()
-                    .ignoresSafeArea()
-            }
-            #endif
+        content
             .onChange(of: viewModel.markdown) { _, newValue in
                 document.rawText = newValue
             }
             .onChange(of: viewModel.styleStore.configuration) {
                 viewModel.refreshStyle()
             }
-            #if os(macOS)
-            .overlay(alignment: .bottom) {
-                CollapsibleToolbar(viewModel: viewModel)
-                    .padding(.bottom, 16)
-            }
-            #else
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button {
-                        showsSettings = true
-                    } label: {
-                        Label("Style Settings", systemImage: "textformat.alt")
-                    }
-                }
-            }
-            #endif
             #if os(iOS)
             .sheet(isPresented: $showsSettings) {
                 NavigationStack {
@@ -67,6 +48,73 @@ struct DocumentEditorView: View {
                 viewModel.pendingExport = nil
             }
             .focusedSceneValue(\.editorViewModel, viewModel)
+    }
+
+    /// The navigator, floating formatting bar, and stats chip appear on
+    /// macOS and iPad, keeping iPad close to the Mac experience. iPhone
+    /// relies on the keyboard accessory bar instead.
+    private var showsDesktopChrome: Bool {
+        #if os(macOS)
+        true
+        #else
+        UIDevice.current.userInterfaceIdiom == .pad
+        #endif
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        if showsDesktopChrome {
+            NavigationSplitView(columnVisibility: navigatorVisibility) {
+                NavigatorView(viewModel: viewModel)
+                    .navigationSplitViewColumnWidth(min: 180, ideal: 230, max: 320)
+            } detail: {
+                editorWithChrome
+            }
+        } else {
+            editorWithChrome
+        }
+    }
+
+    private var navigatorVisibility: Binding<NavigationSplitViewVisibility> {
+        Binding(
+            get: { viewModel.showsNavigator ? .all : .detailOnly },
+            set: { viewModel.showsNavigator = $0 != .detailOnly }
+        )
+    }
+
+    @ViewBuilder
+    private var editorWithChrome: some View {
+        editorView
+            #if os(macOS)
+            .background {
+                VisualEffectBackground()
+                    .ignoresSafeArea()
+            }
+            #endif
+            .overlay(alignment: .bottom) {
+                if showsDesktopChrome, viewModel.showsFormattingBar {
+                    CollapsibleToolbar(viewModel: viewModel)
+                        .padding(.bottom, 16)
+                }
+            }
+            .overlay(alignment: .bottomTrailing) {
+                if showsDesktopChrome, viewModel.showsStatsChip {
+                    StatsChip(viewModel: viewModel)
+                        .padding(.bottom, 16)
+                        .padding(.trailing, 16)
+                }
+            }
+            #if os(iOS)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        showsSettings = true
+                    } label: {
+                        Label("Style Settings", systemImage: "textformat.alt")
+                    }
+                }
+            }
+            #endif
     }
 
     @ViewBuilder

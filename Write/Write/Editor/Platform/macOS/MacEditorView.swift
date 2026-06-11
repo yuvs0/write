@@ -16,6 +16,34 @@ final class WriteTextView: NSTextView {
         onPaste?()
     }
 
+    /// ⌘-drag adds to the selection instead of replacing it, so formatting
+    /// can apply to several stretches of text at once. (TextKit 2 text
+    /// views no longer do this themselves.)
+    override func mouseDown(with event: NSEvent) {
+        let isAdditive = event.modifierFlags.contains(.command)
+            && !event.modifierFlags.contains(.shift)
+        let previousRanges = isAdditive
+            ? selectedRanges.map(\.rangeValue).filter { $0.length > 0 }
+            : []
+
+        super.mouseDown(with: event)
+
+        guard isAdditive, !previousRanges.isEmpty else { return }
+        var ranges = previousRanges + selectedRanges.map(\.rangeValue).filter { $0.length > 0 }
+        guard ranges.count > 1 else { return }
+
+        ranges.sort { $0.location < $1.location }
+        var merged: [NSRange] = []
+        for range in ranges {
+            if let last = merged.last, NSMaxRange(last) >= range.location {
+                merged[merged.count - 1] = NSUnionRange(last, range)
+            } else {
+                merged.append(range)
+            }
+        }
+        setSelectedRanges(merged.map { NSValue(range: $0) }, affinity: .downstream, stillSelecting: false)
+    }
+
     override func setFrameSize(_ newSize: NSSize) {
         super.setFrameSize(newSize)
         let margin = max(Self.basePadding, (newSize.width - Self.columnWidth) / 2)
@@ -149,7 +177,8 @@ struct MacEditorView: NSViewRepresentable {
 
         func textViewDidChangeSelection(_ notification: Notification) {
             guard let textView else { return }
-            viewModel.selectionDidChange(textView.selectedRange())
+            // ⌘-click selection can be discontiguous; report every range.
+            viewModel.selectionDidChange(ranges: textView.selectedRanges.map(\.rangeValue))
         }
     }
 }

@@ -114,17 +114,24 @@ final class ParagraphHandleController: NSObject {
 
         let menu = NSMenu()
         menu.autoenablesItems = false
-        for style in BlockStyle.menuStyles {
-            let item = NSMenuItem(
-                title: style.displayName,
-                action: #selector(applyStyle(_:)),
-                keyEquivalent: ""
-            )
-            item.target = self
-            item.image = NSImage(systemSymbolName: style.symbolName, accessibilityDescription: nil)
-            item.state = style == current ? .on : .off
-            item.representedObject = style.rawValue
-            menu.addItem(item)
+        for (sectionIndex, section) in BlockStyle.menuSections.enumerated() {
+            if sectionIndex > 0 {
+                menu.addItem(.separator())
+            }
+            for style in section {
+                menu.addItem(menuItem(for: style, current: current))
+            }
+            if sectionIndex == 0 {
+                let moreItem = NSMenuItem(title: "More Headings", action: nil, keyEquivalent: "")
+                moreItem.state = BlockStyle.moreHeadings.contains(current) ? .on : .off
+                let submenu = NSMenu()
+                submenu.autoenablesItems = false
+                for style in BlockStyle.moreHeadings {
+                    submenu.addItem(menuItem(for: style, current: current))
+                }
+                moreItem.submenu = submenu
+                menu.addItem(moreItem)
+            }
         }
 
         menu.popUp(
@@ -132,6 +139,19 @@ final class ParagraphHandleController: NSObject {
             at: NSPoint(x: 0, y: sender.bounds.maxY + 4),
             in: sender
         )
+    }
+
+    private func menuItem(for style: BlockStyle, current: BlockStyle) -> NSMenuItem {
+        let item = NSMenuItem(
+            title: style.displayName,
+            action: #selector(applyStyle(_:)),
+            keyEquivalent: ""
+        )
+        item.target = self
+        item.image = NSImage(systemSymbolName: style.symbolName, accessibilityDescription: nil)
+        item.state = style == current ? .on : .off
+        item.representedObject = style.rawValue
+        return item
     }
 
     @objc private func applyStyle(_ sender: NSMenuItem) {

@@ -110,12 +110,12 @@ final class IOSParagraphHandleController: NSObject {
         }
     }
 
-    private func menuActions() -> [UIAction] {
+    private func menuActions() -> [UIMenuElement] {
         guard let viewModel, let paragraphRange = hoveredParagraphRange else { return [] }
         let storage = viewModel.textContentStorage.textStorage
         let current = storage?.blockStyle(at: paragraphRange.location) ?? .body
 
-        return BlockStyle.menuStyles.map { style in
+        func action(for style: BlockStyle) -> UIAction {
             UIAction(
                 title: style.displayName,
                 image: UIImage(systemName: style.symbolName),
@@ -123,6 +123,17 @@ final class IOSParagraphHandleController: NSObject {
             ) { [weak viewModel] _ in
                 viewModel?.setBlockStyle(style, forParagraphsIn: paragraphRange)
             }
+        }
+
+        return BlockStyle.menuSections.enumerated().map { sectionIndex, section in
+            var children: [UIMenuElement] = section.map(action(for:))
+            if sectionIndex == 0 {
+                children.append(UIMenu(
+                    title: "More Headings",
+                    children: BlockStyle.moreHeadings.map(action(for:))
+                ))
+            }
+            return UIMenu(options: .displayInline, children: children)
         }
     }
 }

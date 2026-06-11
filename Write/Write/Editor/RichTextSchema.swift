@@ -66,10 +66,18 @@ enum BlockStyle: String, CaseIterable, Codable {
 
     var isList: Bool { self == .bullet || self == .numbered }
 
-    /// Styles offered in the paragraph handle menu and Format menu.
-    static let menuStyles: [BlockStyle] = [
-        .heading1, .heading2, .heading3, .body, .bullet, .numbered, .quote, .code,
+    /// Styles offered directly in style pickers, grouped into sections
+    /// (headings, body, lists, quote/code).
+    static let menuSections: [[BlockStyle]] = [
+        [.heading1, .heading2, .heading3],
+        [.body],
+        [.bullet, .numbered],
+        [.quote, .code],
     ]
+
+    /// Deeper heading levels, tucked behind a "More Headings" submenu so
+    /// they don't clutter the pickers until someone needs them.
+    static let moreHeadings: [BlockStyle] = [.heading4, .heading5, .heading6]
 }
 
 /// Character-level formatting, stored as a bitmask under `.writeInlineTraits`.

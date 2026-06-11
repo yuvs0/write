@@ -9,6 +9,7 @@ struct WriteApp: App {
         .commands {
             FormatCommands()
             ExportCommands()
+            ViewCommands()
             ZoomCommands()
         }
 
@@ -44,6 +45,9 @@ struct FormatCommands: Commands {
             blockStyleButton(.heading1, shortcut: "1")
             blockStyleButton(.heading2, shortcut: "2")
             blockStyleButton(.heading3, shortcut: "3")
+            blockStyleButton(.heading4, shortcut: "4")
+            blockStyleButton(.heading5, shortcut: "5")
+            blockStyleButton(.heading6, shortcut: "6")
             blockStyleButton(.body, shortcut: "0")
 
             Divider()
@@ -85,6 +89,32 @@ struct ExportCommands: Commands {
                     .disabled(viewModel == nil)
             }
         }
+    }
+}
+
+/// View-menu toggles for the navigator sidebar and floating panels.
+struct ViewCommands: Commands {
+    @FocusedValue(\.editorViewModel) var viewModel
+
+    var body: some Commands {
+        CommandGroup(before: .toolbar) {
+            Toggle("Navigator", isOn: visibility(\.showsNavigator))
+                .keyboardShortcut("1", modifiers: [.command, .control])
+            Toggle("Formatting Bar", isOn: visibility(\.showsFormattingBar))
+                .keyboardShortcut("2", modifiers: [.command, .control])
+            Toggle("Statistics", isOn: visibility(\.showsStatsChip))
+                .keyboardShortcut("3", modifiers: [.command, .control])
+            Divider()
+        }
+    }
+
+    private func visibility(
+        _ keyPath: ReferenceWritableKeyPath<EditorViewModel, Bool>
+    ) -> Binding<Bool> {
+        Binding(
+            get: { viewModel?[keyPath: keyPath] ?? false },
+            set: { viewModel?[keyPath: keyPath] = $0 }
+        )
     }
 }
 

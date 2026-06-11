@@ -22,7 +22,26 @@ final class EditorViewModel {
 
     weak var nativeTextView: NativeTextView?
     var savedSelectedRange = NSRange(location: 0, length: 0)
+    /// All selection ranges — macOS supports ⌘-click discontiguous
+    /// selection, so formatting applies to every range at once.
+    var savedSelectedRanges: [NSRange] = [NSRange(location: 0, length: 0)]
     var zoomScale: CGFloat = 1.0
+
+    // MARK: - Floating UI visibility (View menu toggles, persisted)
+
+    var showsNavigator = EditorViewModel.uiDefault("write.ui.showsNavigator", false) {
+        didSet { UserDefaults.standard.set(showsNavigator, forKey: "write.ui.showsNavigator") }
+    }
+    var showsFormattingBar = EditorViewModel.uiDefault("write.ui.showsFormattingBar", true) {
+        didSet { UserDefaults.standard.set(showsFormattingBar, forKey: "write.ui.showsFormattingBar") }
+    }
+    var showsStatsChip = EditorViewModel.uiDefault("write.ui.showsStatsChip", true) {
+        didSet { UserDefaults.standard.set(showsStatsChip, forKey: "write.ui.showsStatsChip") }
+    }
+
+    private static func uiDefault(_ key: String, _ fallback: Bool) -> Bool {
+        UserDefaults.standard.object(forKey: key) as? Bool ?? fallback
+    }
 
     /// Serialized markdown, kept in sync with the text storage.
     private(set) var markdown: String
@@ -148,6 +167,12 @@ final class EditorViewModel {
     // MARK: - Selection
 
     func selectionDidChange(_ range: NSRange) {
+        selectionDidChange(ranges: [range])
+    }
+
+    func selectionDidChange(ranges: [NSRange]) {
+        savedSelectedRanges = ranges.isEmpty ? [NSRange(location: 0, length: 0)] : ranges
+        let range = savedSelectedRanges[0]
         savedSelectedRange = range
         guard let textStorage = textContentStorage.textStorage else { return }
         let text = textStorage.string as NSString
@@ -190,9 +215,10 @@ final class EditorViewModel {
 
     func toggleTrait(_ trait: InlineTraits, removing conflicting: InlineTraits = []) {
         guard let textStorage = textContentStorage.textStorage else { return }
-        let range = savedSelectedRange
+        let text = textStorage.string as NSString
+        let ranges = savedSelectedRanges.filter { $0.length > 0 && NSMaxRange($0) <= text.length }
 
-        if range.length == 0 {
+        if ranges.isEmpty {
             // No selection: flip the trait for upcoming typing.
             var traits = activeTraits
             if traits.contains(trait) {
@@ -206,47 +232,69 @@ final class EditorViewModel {
             return
         }
 
-        let text = textStorage.string as NSString
-        guard NSMaxRange(range) <= text.length else { return }
-
-        // Add the trait if any part of the selection lacks it; remove it
-        // only when the whole selection already has it.
+        // Add the trait if any part of any selection lacks it; remove it
+        // only when every selection already has it.
         var shouldAdd = false
-        textStorage.enumerateAttribute(.writeInlineTraits, in: range, options: []) { value, _, stop in
-            let traits = InlineTraits(rawValue: (value as? NSNumber)?.intValue ?? 0)
-            if !traits.contains(trait) {
-                shouldAdd = true
-                stop.pointee = true
+        for range in ranges {
+            textStorage.enumerateAttribute(.writeInlineTraits, in: range, options: []) { value, _, stop in
+                let traits = InlineTraits(rawValue: (value as? NSNumber)?.intValue ?? 0)
+                if !traits.contains(trait) {
+                    shouldAdd = true
+                    stop.pointee = true
+                }
+            }
+            if shouldAdd { break }
+        }
+
+        performAttributeEdit(in: ranges) { storage in
+            for range in ranges {
+                storage.enumerateAttribute(.writeInlineTraits, in: range, options: []) { value, runRange, _ in
+                    var traits = InlineTraits(rawValue: (value as? NSNumber)?.intValue ?? 0)
+                    if shouldAdd {
+                        traits.insert(trait)
+                        traits.subtract(conflicting)
+                    } else {
+                        traits.remove(trait)
+                    }
+                    if traits.isEmpty {
+                        storage.removeAttribute(.writeInlineTraits, range: runRange)
+                    } else {
+                        storage.addAttribute(
+                            .writeInlineTraits, value: NSNumber(value: traits.rawValue), range: runRange
+                        )
+                    }
+                }
+                self.styler.applyStyles(to: storage, in: range)
             }
         }
 
-        performAttributeEdit(in: range) { storage in
-            storage.enumerateAttribute(.writeInlineTraits, in: range, options: []) { value, runRange, _ in
-                var traits = InlineTraits(rawValue: (value as? NSNumber)?.intValue ?? 0)
-                if shouldAdd {
-                    traits.insert(trait)
-                    traits.subtract(conflicting)
-                } else {
-                    traits.remove(trait)
-                }
-                if traits.isEmpty {
-                    storage.removeAttribute(.writeInlineTraits, range: runRange)
-                } else {
-                    storage.addAttribute(
-                        .writeInlineTraits, value: NSNumber(value: traits.rawValue), range: runRange
-                    )
-                }
-            }
-            self.styler.applyStyles(to: storage, in: range)
-        }
-
-        selectionDidChange(range)
+        selectionDidChange(ranges: savedSelectedRanges)
     }
 
     // MARK: - Block formatting
 
     func setBlockStyle(_ style: BlockStyle) {
-        setBlockStyle(style, forParagraphsIn: savedSelectedRange)
+        guard let textStorage = textContentStorage.textStorage else { return }
+        let paragraphRanges = mergedParagraphRanges(
+            for: savedSelectedRanges, in: textStorage.string as NSString
+        ).filter { $0.length > 0 }
+
+        guard !paragraphRanges.isEmpty else {
+            // Empty document or trailing empty paragraph: set typing attributes.
+            activeBlockStyle = style
+            updateTypingAttributes(blockStyle: style, traits: activeTraits)
+            return
+        }
+
+        performAttributeEdit(in: paragraphRanges) { storage in
+            for paragraphRange in paragraphRanges {
+                self.setBlockStyleAttribute(style, paragraphRange: paragraphRange, in: storage)
+                self.styler.applyStyles(to: storage, in: paragraphRange)
+            }
+        }
+
+        activeBlockStyle = style
+        updateTypingAttributes(blockStyle: style, traits: activeTraits)
     }
 
     func setBlockStyle(_ style: BlockStyle, forParagraphsIn range: NSRange) {
@@ -264,13 +312,34 @@ final class EditorViewModel {
             return
         }
 
-        performAttributeEdit(in: paragraphRange) { storage in
+        performAttributeEdit(in: [paragraphRange]) { storage in
             self.setBlockStyleAttribute(style, paragraphRange: paragraphRange, in: storage)
             self.styler.applyStyles(to: storage, in: paragraphRange)
         }
 
         activeBlockStyle = style
         updateTypingAttributes(blockStyle: style, traits: activeTraits)
+    }
+
+    /// Paragraph ranges covering every selection, merged so overlapping
+    /// selections in the same paragraph aren't styled twice.
+    private func mergedParagraphRanges(for ranges: [NSRange], in text: NSString) -> [NSRange] {
+        let paragraphRanges = ranges.map { range -> NSRange in
+            let location = min(max(0, range.location), text.length)
+            let length = min(max(0, range.length), text.length - location)
+            return text.paragraphRange(for: NSRange(location: location, length: length))
+        }
+        .sorted { $0.location < $1.location }
+
+        var merged: [NSRange] = []
+        for range in paragraphRanges {
+            if let last = merged.last, NSMaxRange(last) >= range.location {
+                merged[merged.count - 1] = NSUnionRange(last, range)
+            } else {
+                merged.append(range)
+            }
+        }
+        return merged
     }
 
     private func setBlockStyleAttribute(
@@ -298,13 +367,14 @@ final class EditorViewModel {
 
     // MARK: - Undo-aware attribute edits
 
-    private func performAttributeEdit(in range: NSRange, _ edit: (NSTextStorage) -> Void) {
-        guard let textStorage = textContentStorage.textStorage else { return }
+    private func performAttributeEdit(in ranges: [NSRange], _ edit: (NSTextStorage) -> Void) {
+        guard let textStorage = textContentStorage.textStorage, !ranges.isEmpty else { return }
 
         #if os(macOS)
         if let textView = nativeTextView {
             // Attribute-only change: registers undo with the text view.
-            guard textView.shouldChangeText(in: range, replacementString: nil) else { return }
+            let rangeValues = ranges.map { NSValue(range: $0) }
+            guard textView.shouldChangeText(inRanges: rangeValues, replacementStrings: nil) else { return }
             textStorage.beginEditing()
             edit(textStorage)
             textStorage.endEditing()
@@ -315,17 +385,19 @@ final class EditorViewModel {
             textStorage.endEditing()
         }
         #else
-        let before = textStorage.attributedSubstring(from: range)
+        let snapshots = ranges.map { ($0, textStorage.attributedSubstring(from: $0)) }
         textStorage.beginEditing()
         edit(textStorage)
         textStorage.endEditing()
 
         if let undoManager = nativeTextView?.undoManager {
             undoManager.registerUndo(withTarget: self) { target in
-                target.performAttributeEdit(in: range) { storage in
-                    storage.replaceCharacters(in: range, with: before)
+                target.performAttributeEdit(in: ranges) { storage in
+                    for (range, before) in snapshots {
+                        storage.replaceCharacters(in: range, with: before)
+                    }
                 }
-                target.selectionDidChange(target.savedSelectedRange)
+                target.selectionDidChange(ranges: target.savedSelectedRanges)
             }
             undoManager.setActionName("Formatting")
         }
@@ -362,6 +434,115 @@ final class EditorViewModel {
     func resetZoom() {
         zoomScale = 1.0
         refreshStyle()
+    }
+
+    // MARK: - Statistics
+
+    /// Live document statistics for the stats panel. Reading `markdown`
+    /// ties this to the observation system so views refresh on each edit.
+    var statistics: DocumentStatistics {
+        _ = markdown
+        return .compute(from: textContentStorage.textStorage?.string ?? "")
+    }
+
+    // MARK: - Outline
+
+    /// Heading outline for the navigator sidebar.
+    var outline: [OutlineItem] {
+        _ = markdown
+        guard let textStorage = textContentStorage.textStorage else { return [] }
+        let text = textStorage.string as NSString
+
+        // Collect every paragraph with its style first, so each heading can
+        // pull its section's opening words for the tooltip.
+        var paragraphs: [(range: NSRange, style: BlockStyle, content: String)] = []
+        var location = 0
+        while location < text.length {
+            let paragraph = text.paragraphRange(for: NSRange(location: location, length: 0))
+            var contentLength = paragraph.length
+            if contentLength > 0, text.character(at: NSMaxRange(paragraph) - 1) == 0x0A {
+                contentLength -= 1
+            }
+            let content = text.substring(
+                with: NSRange(location: paragraph.location, length: contentLength)
+            )
+            paragraphs.append((paragraph, textStorage.blockStyle(at: paragraph.location), content))
+            location = NSMaxRange(paragraph)
+            if paragraph.length == 0 { break }
+        }
+
+        var items: [OutlineItem] = []
+        for (index, paragraph) in paragraphs.enumerated() {
+            guard let level = paragraph.style.headingLevel else { continue }
+
+            var previewWords: [String] = []
+            for following in paragraphs[(index + 1)...] {
+                guard following.style.headingLevel == nil else { break }
+                previewWords.append(contentsOf: following.content.split(separator: " ").map(String.init))
+                if previewWords.count >= 12 { break }
+            }
+            let preview = previewWords.prefix(12).joined(separator: " ")
+
+            let title = paragraph.content.trimmingCharacters(in: .whitespaces)
+            items.append(OutlineItem(
+                id: paragraph.range.location,
+                level: level,
+                title: title.isEmpty ? "Untitled" : title,
+                preview: preview.isEmpty ? "Empty section" : preview + "…",
+                paragraphRange: paragraph.range
+            ))
+        }
+        return items
+    }
+
+    /// Scrolls so the heading sits about three lines from the top, and
+    /// places the caret on it.
+    func scrollToHeading(at paragraphRange: NSRange) {
+        let contentStorage = textContentStorage
+        let documentStart = contentStorage.documentRange.location
+        guard let target = contentStorage.location(documentStart, offsetBy: paragraphRange.location),
+              let layoutEnd = contentStorage.location(target, offsetBy: max(paragraphRange.length, 1)),
+              let layoutRange = NSTextRange(location: documentStart, end: layoutEnd)
+        else { return }
+
+        textLayoutManager.ensureLayout(for: layoutRange)
+        guard let fragment = textLayoutManager.textLayoutFragment(for: target) else { return }
+
+        let fragmentY = fragment.layoutFragmentFrame.minY
+        let bodyLineHeight = styleStore.configuration.paragraph.fontSize * zoomScale * 1.4
+        let headroom = bodyLineHeight * 3
+
+        #if os(macOS)
+        guard let textView = nativeTextView, let scrollView = textView.enclosingScrollView else { return }
+        let maxScroll = max(0, textView.frame.height - scrollView.contentView.bounds.height)
+        let targetY = min(max(0, fragmentY + textView.textContainerOrigin.y - headroom), maxScroll)
+
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.3
+            context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            scrollView.contentView.animator().setBoundsOrigin(
+                NSPoint(x: scrollView.contentView.bounds.origin.x, y: targetY)
+            )
+        } completionHandler: {
+            scrollView.reflectScrolledClipView(scrollView.contentView)
+        }
+
+        textView.setSelectedRange(NSRange(location: paragraphRange.location, length: 0))
+        textView.window?.makeFirstResponder(textView)
+        #else
+        guard let textView = nativeTextView else { return }
+        let adjusted = textView.adjustedContentInset
+        let maxOffset = max(
+            -adjusted.top,
+            textView.contentSize.height + adjusted.bottom - textView.bounds.height
+        )
+        let targetY = min(
+            max(-adjusted.top, fragmentY + textView.textContainerInset.top - headroom - adjusted.top),
+            maxOffset
+        )
+        textView.setContentOffset(CGPoint(x: 0, y: targetY), animated: true)
+        textView.selectedRange = NSRange(location: paragraphRange.location, length: 0)
+        #endif
     }
 
     // MARK: - Export
