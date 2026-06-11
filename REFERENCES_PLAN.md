@@ -1,113 +1,159 @@
-# References & Citations — Implementation Plan
+# References & Citations — FINALIZED implementation plan
 
-Goal: first-class academic referencing inside Write — insert citations while
-writing, pick a style (Harvard, APA, MLA, Chicago, IEEE, Vancouver, …), and
-get a correctly formatted bibliography in the editor and in every export
-(PDF, DOCX). The user never formats a reference by hand.
+Status: approved, in implementation. This document is the working spec —
+implementation agents should treat the contracts here as binding and flag
+(not silently change) anything that doesn't survive contact with reality.
 
-## Guiding decisions
+## Decisions (locked)
 
-1. **Build on CSL (Citation Style Language).** Styles like "Harvard" are not
-   one format — there are dozens of institutional variants. CSL is the open
-   standard used by Zotero/Mendeley/Pandoc: ~2,000 maintained styles as XML
-   files (`citation-style-language/styles` repo, CC-BY-SA). We implement (or
-   port) a CSL processor rather than hand-coding each style. Hand-coding
-   APA + Harvard "author–date" first is an acceptable v1 shortcut, but the
-   data model must be CSL-shaped from day one so styles scale later.
-2. **CSL-JSON is the canonical reference model.** Every reference is stored
-   as a CSL-JSON item (`type`, `author[]`, `title`, `issued`, `DOI`, …).
-   This gives us import/export compatibility with Zotero, BibTeX
-   converters, and DOI lookups for free.
-3. **References live in the document package.** A `references.json` file
-   beside `content.md` keeps each document self-contained and syncable.
-   A later iteration can add an app-wide library with per-document links.
-4. **Citations in the text are stable keys, not formatted text.** In
-   markdown storage we use Pandoc-style cite syntax: `[@smith2020, p. 31]`.
-   In the editor the citation is an atomic chip (text attachment / custom
-   attribute run) rendered as the *formatted* citation for the active style
-   — e.g. "(Smith, 2020, p. 31)" — and is not character-editable; clicking
-   it opens the citation editor popover.
+1. **CSL-JSON** is the canonical model for every source; stored in
+   `references.json` inside the `.write` package.
+2. **citeproc-js running in JavaScriptCore** is the formatting engine —
+   bundled offline, no network. Bundled styles: APA 7, Harvard (Cite Them
+   Right), MLA 9, Chicago 17 author-date, IEEE, Vancouver. Locales: en-US,
+   en-GB.
+3. **Citation style is per-document**, stored in `settings.json` in the
+   package; switching restyles all chips + bibliography live.
+4. **Citations are atomic chips** in the editor (rendered formatted text,
+   not character-editable; click → popover to edit locator/remove).
+   Markdown storage uses Pandoc syntax: `[@smith2020]`,
+   `[@smith2020, p. 31]`, `[@a; @b]`.
+5. **Metadata resolution is native and tiered** — no external service:
+   DOI (doi.org CSL-JSON content negotiation) → arXiv API → ISBN
+   (OpenLibrary) → generic URL (Highwire `citation_*` meta tags → JSON-LD
+   schema.org → OpenGraph → fallback title/site/accessed). User can always
+   edit fields afterwards.
+6. **⌘↩ on a URL/DOI token** in the editor turns it into a citation chip
+   (resolve → dedupe by DOI/URL → insert chip → optional page-number
+   popover).
+7. **Reference manager is an inspector panel** (trailing edge, toggleable
+   from View menu ⌃⌘4) on macOS and iPadOS: source list with search, add
+   via paste-link or manual form, edit, delete (warn if cited), usage
+   counts, expandable "cited at…" rows that jump to each citation.
+8. **Bibliography**: Format menu → "Insert References List" (at cursor /
+   at end). A marked region that auto-regenerates whenever sources, style,
+   or citations change. Read-only in the editor.
+9. **DOCX export is Word-native**: sources → `customXml` part with
+   `b:Sources` (Word bibliography schema), in-text citations → SDT-wrapped
+   `CITATION` fields with our formatted text as the field result,
+   bibliography → SDT-wrapped `BIBLIOGRAPHY` field. URLs/DOIs preserved in
+   source records and hyperlinks. Known/accepted: Word's schema is poorer
+   than CSL (lossy mapping); Word re-renders with its own engine on
+   refresh.
 
-## Architecture
+## Module contracts
 
+### CSLItem (References/CSLItem.swift — exists, owned by orchestrator)
+
+JSON-faithful model: `id` (citekey) + `fields: [String: JSONValue]`
+holding raw CSL-JSON. Typed accessors for common fields. Round-trips
+arbitrary CSL-JSON without loss. `cslJSONObject: [String: Any]` feeds
+citeproc directly.
+
+### CitationEngine (References/CitationEngine.swift)
+
+```swift
+struct CitationRef: Hashable, Codable {
+    var itemID: String
+    var locator: String?      // "31-33"
+    var label: String?        // CSL locator term, default "page"
+}
+
+final class CitationEngine {
+    init(styleID: String, items: [[String: Any]]) throws  // loads bundled style/locale/citeproc
+    func update(items: [[String: Any]])
+    func inlineCitation(_ refs: [CitationRef]) -> String          // plain text, e.g. "(Smith, 2020, p. 31)"
+    func bibliography() -> [FormattedEntry]                       // ordered entries
+}
+
+struct FormattedEntry {
+    var text: String                       // plain text
+    var traitRuns: [(NSRange, InlineTraits)]  // italics etc. mapped from citeproc HTML
+}
 ```
-Document package
-├── content.md          ← body text with [@citekey] markers
-└── references.json     ← CSL-JSON array, one item per reference
 
-App
-├── ReferenceStore        (per-document; loads/saves references.json)
-├── CitationParser        (maps [@key] runs ⇄ .writeCitation attribute runs)
-├── CSLProcessor          (style XML + items → formatted citations + bibliography)
-│     ├── StyleRepository (bundled subset + on-demand download of full repo)
-│     └── Locale files    (CSL locales for punctuation/terms)
-└── UI
-      ├── Citation popover    (search library, insert, edit locator/prefix)
-      ├── Reference editor    (form per type: book, article, chapter, web…)
-      ├── Bibliography block  (auto-generated, read-only, restyled live)
-      └── Style picker        (document setting; persisted in package)
+citeproc outputs HTML-ish strings (`<i>`, `<b>`, entities) —
+`CitationHTML.swift` converts to plain text + InlineTraits runs.
+Bundled assets live in `Write/Write/References/CitationAssets/`
+(citeproc.js, *.csl, locales-*.xml) and load via `Bundle.main`.
+
+### MetadataResolver (References/MetadataResolver.swift)
+
+```swift
+struct MetadataResolver {
+    enum Input { case doi(String), arxiv(String), isbn(String), url(URL) }
+    static func detect(_ string: String) -> Input?    // also strips doi.org/arxiv.org URL forms to ids
+    func resolve(_ input: Input) async throws -> CSLItem
+}
 ```
 
-### The CSL processor
+### ReferenceStore (References/ReferenceStore.swift)
 
-- v1: implement the subset of CSL needed by the top ~10 styles
-  (author-date + numeric + note classes cover almost everything):
-  name formatting (initials, et-al rules), date parts, title casing,
-  punctuation joins, sorting, disambiguation (2020a/2020b), locators.
-- Test against the official CSL test fixtures for the styles we ship.
-- Alternative considered: embed citeproc-js in a JSCore context (heavy,
-  but battle-tested) — keep as fallback if the native subset proves
-  error-prone. Decide after a spike; JSCore is available on all our
-  platforms, so this is a realistic shortcut to full style coverage.
+`@Observable` per-document store: `items: [CSLItem]`, `styleID: String`,
+CRUD, `find(doi:)/find(url:)`, citekey generation (authorYear + a/b/c
+disambiguation), serialization to/from `Data` for the document package.
 
-### Reference intake (the part users feel)
+### Document package (Model/MarkdownDocument.swift)
 
-Priority order:
-1. **Paste a DOI / URL / ISBN** → resolve automatically:
-   - DOI → `https://doi.org/{doi}` with `Accept: application/vnd.citationstyles.csl+json`
-   - ISBN → OpenLibrary / Google Books API → map to CSL-JSON
-   - URL → fetch page, read OpenGraph/Highwire meta tags → `webpage` item
-2. **Manual form** — per-type fields with validation, author list editor.
-3. **Import** — BibTeX (`.bib`) and CSL-JSON file import; Zotero export
-   round-trips through both.
+Package gains `references.json` + `settings.json`; `fileWrapper(...)`
+MUST preserve wrappers it doesn't own (assets/, future files) instead of
+rebuilding from scratch. Document struct carries `referencesJSON: Data?`
+and `settingsJSON: Data?` alongside `rawText`.
 
 ### Editor integration
 
-- Typing `@` in the editor (or ⌘⇧C / toolbar "Cite") opens the citation
-  popover anchored at the caret: fuzzy-search existing references, or
-  paste DOI to add-and-cite in one step.
-- A citation run carries `.writeCitation` (citekey + locator + flags) the
-  same way links carry `.writeLink`; serialization emits `[@key]` and the
-  parser recreates the chip. Styler renders chips from CSLProcessor output,
-  so switching document style re-renders every citation instantly.
-- Bibliography: a trailing document section regenerated on reference or
-  style change; excluded from manual editing (block style `.bibliography`).
+- `.writeCitation` attribute on chip runs; value = JSON-encoded
+  `[CitationRef]`. Chip text = engine's formatted citation. Chips are
+  atomic: selection snaps around them, editing inside deletes whole chip.
+- Serializer emits `[@key, p. X]`; parser recognizes unescaped `[@…]`
+  (our serializer escapes literal `[`, so this is unambiguous in our own
+  files) and regenerates chip text from the engine at load.
+- Bibliography region markers in markdown:
+  `<!-- references:begin -->` … `<!-- references:end -->` with a
+  "References" heading + entries inside; parser treats the region as
+  generated (re-derived from store at load), serializer re-emits current
+  formatted entries so plain markdown readers still see the list.
+- Usage tracking: scan storage for `.writeCitation` runs → counts +
+  locations for the manager (reuse navigator's scroll-to machinery).
 
-### Export mapping
+### DOCX mapping
 
-- **PDF**: formatted strings come straight from CSLProcessor — nothing extra.
-- **DOCX**: emit citations as plain formatted runs in v1. v2: write Word
-  field codes (`w:fldSimple` with Zotero/CSL JSON payload) so citations
-  stay live for Zotero-using collaborators.
+CSL type → b:SourceType: article-journal→JournalArticle, book→Book,
+chapter→BookSection, paper-conference→ConferenceProceedings,
+webpage→InternetSite, report→Report, thesis→Report, else→Misc.
+Authors → `b:Author/b:NameList` persons. Title/Year/Pages/Publisher/
+URL/DOI mapped where Word has fields. `customXml/item1.xml` +
+`customXml/itemProps1.xml` + content-types + rels entries.
 
-## Milestones
+## Phases & ownership (agents must stay inside their files)
 
-| # | Deliverable | Notes |
-|---|-------------|-------|
-| 1 | ReferenceStore + references.json + manual reference editor UI | no formatting yet |
-| 2 | Citation chips in editor, `[@key]` round-trip in markdown | uses placeholder "(Author, Year)" format |
-| 3 | CSL processor spike: native subset vs citeproc-js via JSCore | decision gate |
-| 4 | Harvard (Cite Them Right) + APA 7 end-to-end incl. bibliography | the two requested styles first |
-| 5 | DOI/ISBN/URL auto-intake | biggest UX win |
-| 6 | MLA 9, Chicago 17 (author-date + notes), IEEE, Vancouver | from CSL repo |
-| 7 | BibTeX/CSL-JSON import-export; Pandoc-compatible markdown | interop |
-| 8 | DOCX live field codes | collaboration |
+- **P1a — CitationEngine + assets** (References/CitationEngine.swift,
+  CitationHTML.swift, CitationAssets/)
+- **P1b — MetadataResolver** (References/MetadataResolver.swift)
+- **P1c — ReferenceStore + package I/O** (References/ReferenceStore.swift,
+  Model/MarkdownDocument.swift)
+- **P2a — schema + serialization** (Editor/RichTextSchema.swift,
+  Parsing/*)
+- **P2b — editor chips, ⌘↩, bibliography regen** (Editor/*, Styling/*)
+- **P2c — manager inspector + View menu** (Views/*, WriteApp.swift)
+- **P3 — DOCX/PDF export** (Export/*)
+- **P4 — images** (see IMAGES_PLAN.md)
 
-## Open questions
+## Verification expectations
 
-- App-wide reference library vs per-document only (start per-document;
-  library syncs via iCloud later).
-- Footnote-class styles (Chicago notes) need footnote support in the
-  editor first — sequence after the footnotes backlog item.
-- Style picker placement: document settings popover vs File → Document
-  Style… menu. Lean document settings, stored in package metadata.
+- Each phase builds for macOS AND iOS Simulator with zero new warnings.
+- Engine: scratch CLI run formats known fixtures in APA + Harvard
+  (single author, two authors, et-al, page locator, year disambiguation)
+  and bibliography ordering.
+- Resolver: live-network CLI checks against a real DOI, arXiv id, ISBN,
+  and a news URL.
+- Package I/O: round-trip preserves unknown files in the package.
+- DOCX: python-docx structural checks + open in real Word (computer-use)
+  to confirm Manage Sources sees the sources.
+
+## Deferred (explicitly out of v1)
+
+- Footnote-class styles (Chicago notes) — needs footnotes first.
+- App-wide reference library + iCloud sync (per-document only for now).
+- Style search/download from the full CSL repo.
+- BibTeX import/export.
