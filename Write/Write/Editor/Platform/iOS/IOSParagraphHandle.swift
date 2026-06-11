@@ -76,11 +76,21 @@ final class IOSParagraphHandleController: NSObject {
         let length = contentStorage.offset(from: range.location, to: range.endLocation)
         hoveredParagraphRange = NSRange(location: start, length: length)
 
-        let firstLineHeight = fragment.textLineFragments.first?.typographicBounds.height
-            ?? frame.height
+        // Center the handle on the cap-height band of the first line so it
+        // tracks the text baseline whatever the paragraph's font size.
+        var centerY = frame.minY + frame.height / 2
+        if let firstLine = fragment.textLineFragments.first {
+            let baseline = frame.minY + firstLine.typographicBounds.minY + firstLine.glyphOrigin.y
+            let font = contentStorage.textStorage.flatMap {
+                $0.length > start ? $0.attribute(.font, at: start, effectiveRange: nil) as? UIFont : nil
+            }
+            let capHeight = font?.capHeight ?? 10
+            centerY = baseline - capHeight / 2
+        }
+
         button.frame.origin = CGPoint(
-            x: inset.left - button.frame.width - 8,
-            y: inset.top + frame.minY + max(0, (min(firstLineHeight, 30) - button.frame.height) / 2)
+            x: max(2, inset.left - button.frame.width - 6),
+            y: (inset.top + centerY - button.frame.height / 2).rounded()
         )
         show()
     }

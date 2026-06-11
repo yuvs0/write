@@ -6,10 +6,10 @@ final class WriteTextView: NSTextView {
     var onPaste: (() -> Void)?
     var onMouseMoved: ((NSPoint?) -> Void)?
 
-    /// Width of the text column; margins grow beyond this to keep prose
-    /// comfortable to read and leave a gutter for the paragraph handle.
+    /// Width of the text column; side margins grow beyond the base padding
+    /// only to center the column. The hover handle floats inside the margin.
     static let columnWidth: CGFloat = 680
-    static let minimumMargin: CGFloat = 64
+    static let basePadding: CGFloat = 28
 
     override func paste(_ sender: Any?) {
         pasteAsPlainText(sender)
@@ -18,8 +18,8 @@ final class WriteTextView: NSTextView {
 
     override func setFrameSize(_ newSize: NSSize) {
         super.setFrameSize(newSize)
-        let margin = max(Self.minimumMargin, (newSize.width - Self.columnWidth) / 2)
-        let inset = NSSize(width: margin.rounded(), height: 28)
+        let margin = max(Self.basePadding, (newSize.width - Self.columnWidth) / 2)
+        let inset = NSSize(width: margin.rounded(), height: Self.basePadding)
         if textContainerInset != inset {
             textContainerInset = inset
         }
@@ -73,7 +73,9 @@ struct MacEditorView: NSViewRepresentable {
         textView.isAutomaticTextReplacementEnabled = true
         textView.isContinuousSpellCheckingEnabled = true
         textView.drawsBackground = false
-        textView.textContainerInset = NSSize(width: WriteTextView.minimumMargin, height: 28)
+        textView.textContainerInset = NSSize(
+            width: WriteTextView.basePadding, height: WriteTextView.basePadding
+        )
         textView.isVerticallyResizable = true
         textView.isHorizontallyResizable = false
         textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)

@@ -22,7 +22,10 @@ struct PDFExporter {
 
     func pdfData(from semantic: NSAttributedString) -> Data? {
         let content = NSMutableAttributedString(attributedString: semantic)
-        var styler = RichTextStyler(configuration: configuration, zoomScale: 1.0)
+        // Print sizing: body renders at 11pt and everything else scales
+        // proportionally, regardless of the on-screen editing sizes.
+        let scale = DocxExporter.exportBodyPointSize / max(configuration.paragraph.fontSize, 1)
+        var styler = RichTextStyler(configuration: configuration, zoomScale: scale)
         styler.forExport = true
         styler.applyStyles(to: content)
         materializeListMarkers(in: content)

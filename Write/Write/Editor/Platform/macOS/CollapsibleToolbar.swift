@@ -1,44 +1,38 @@
 #if os(macOS)
 import SwiftUI
 
+/// Hover-expanding formatting bar. The collapsed glyph and the expanded bar
+/// share a glass effect ID inside one container, so the system performs the
+/// Liquid Glass morph between the two shapes.
 struct CollapsibleToolbar: View {
     @Bindable var viewModel: EditorViewModel
     @State private var isExpanded = false
-    @State private var buttonsWidth: CGFloat = 0
+    @Namespace private var glassNamespace
 
     var body: some View {
-        HStack(spacing: 0) {
-            formattingButtons
-                .fixedSize()
-                .frame(width: isExpanded ? buttonsWidth : 0, alignment: .leading)
-                .clipped()
-                .opacity(isExpanded ? 1 : 0)
-
-            Image(systemName: "textformat")
-                .font(.system(size: 12, weight: .medium))
-                .frame(width: isExpanded ? 0 : 28, height: 28)
-                .opacity(isExpanded ? 0 : 1)
-                .clipped()
-        }
-        .padding(.horizontal, isExpanded ? 8 : 0)
-        .padding(.vertical, 4)
-        .glassEffect(.regular, in: .capsule)
-        .contentShape(Capsule())
-        .onHover { hovering in
-            withAnimation(.spring(duration: 0.35, bounce: 0.12)) {
-                isExpanded = hovering
+        GlassEffectContainer {
+            Group {
+                if isExpanded {
+                    formattingButtons
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 5)
+                        .glassEffect(.regular.interactive(), in: .capsule)
+                        .glassEffectID("formatting", in: glassNamespace)
+                } else {
+                    Image(systemName: "textformat")
+                        .font(.system(size: 12, weight: .medium))
+                        .frame(width: 28, height: 28)
+                        .contentShape(.circle)
+                        .glassEffect(.regular.interactive(), in: .circle)
+                        .glassEffectID("formatting", in: glassNamespace)
+                }
+            }
+            .onHover { hovering in
+                withAnimation(.smooth(duration: 0.35)) {
+                    isExpanded = hovering
+                }
             }
         }
-        .background(
-            formattingButtons
-                .fixedSize()
-                .hidden()
-                .onGeometryChange(for: CGFloat.self) { proxy in
-                    proxy.size.width
-                } action: { width in
-                    buttonsWidth = width
-                }
-        )
     }
 
     private var formattingButtons: some View {
@@ -64,7 +58,6 @@ struct CollapsibleToolbar: View {
                 .code, viewModel.toggleInlineCode
             )
         }
-        .padding(.horizontal, 4)
     }
 
     private var styleMenu: some View {

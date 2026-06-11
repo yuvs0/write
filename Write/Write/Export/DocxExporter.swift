@@ -6,6 +6,14 @@ import Foundation
 struct DocxExporter {
     let configuration: StyleConfiguration
 
+    /// Exports normalize the body size to standard print sizing, scaling
+    /// every other style proportionally.
+    static let exportBodyPointSize: CGFloat = 11
+
+    private var exportScale: CGFloat {
+        Self.exportBodyPointSize / max(configuration.paragraph.fontSize, 1)
+    }
+
     private static let bulletNumId = 1
     /// Numbered runs allocate fresh numbering instances starting here so
     /// each list restarts at 1.
@@ -17,6 +25,7 @@ struct DocxExporter {
         var archive = ZipArchive()
         archive.addFile(named: "[Content_Types].xml", data: Data(contentTypesXML.utf8))
         archive.addFile(named: "_rels/.rels", data: Data(relsXML.utf8))
+        archive.addFile(named: "word/_rels/document.xml.rels", data: Data(documentRelsXML.utf8))
         archive.addFile(named: "word/document.xml", data: Data(documentXML(body: body).utf8))
         archive.addFile(named: "word/styles.xml", data: Data(stylesXML.utf8))
         archive.addFile(
@@ -149,6 +158,18 @@ struct DocxExporter {
         """
     }
 
+    /// Parts are discovered through relationships, not filenames — without
+    /// these entries importers silently ignore styles.xml and numbering.xml.
+    private var documentRelsXML: String {
+        """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+        <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
+        <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering" Target="numbering.xml"/>
+        </Relationships>
+        """
+    }
+
     private func documentXML(body: String) -> String {
         """
         <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -166,17 +187,20 @@ struct DocxExporter {
         <w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/>\(paragraphPropertiesXML(for: configuration.paragraph))<w:rPr>\(runFontsXML(for: configuration.paragraph))</w:rPr></w:style>
         """
 
+        // Child order inside w:style and w:pPr follows the OOXML schema
+        // (qFormat before pPr; spacing before ind/outlineLvl; shd before
+        // spacing) — strict importers discard the whole styles part otherwise.
         for level in 1...6 {
             let style = configuration.styleForHeading(level: level)
             styles += """
-            <w:style w:type="paragraph" w:styleId="Heading\(level)"><w:name w:val="heading \(level)"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:pPr><w:outlineLvl w:val="\(level - 1)"/>\(spacingXML(for: style))</w:pPr><w:rPr>\(runFontsXML(for: style))\(style.fontWeight.isBoldForExport ? "<w:b/>" : "")\(style.isItalic ? "<w:i/>" : "")</w:rPr></w:style>
+            <w:style w:type="paragraph" w:styleId="Heading\(level)"><w:name w:val="heading \(level)"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:qFormat/><w:pPr>\(spacingXML(for: style))<w:outlineLvl w:val="\(level - 1)"/></w:pPr><w:rPr>\(runFontsXML(for: style))\(style.fontWeight.isBoldForExport ? "<w:b/>" : "")\(style.isItalic ? "<w:i/>" : "")</w:rPr></w:style>
             """
         }
 
         styles += """
-        <w:style w:type="paragraph" w:styleId="Quote"><w:name w:val="Quote"/><w:basedOn w:val="Normal"/><w:pPr><w:ind w:left="720"/>\(spacingXML(for: configuration.blockquote))</w:pPr><w:rPr>\(runFontsXML(for: configuration.blockquote))\(configuration.blockquote.isItalic ? "<w:i/>" : "")<w:color w:val="595959"/></w:rPr></w:style>
-        <w:style w:type="paragraph" w:styleId="CodeBlock"><w:name w:val="Code Block"/><w:basedOn w:val="Normal"/><w:pPr>\(spacingXML(for: configuration.code))<w:shd w:val="clear" w:color="auto" w:fill="F2F2F2"/></w:pPr><w:rPr>\(runFontsXML(for: configuration.code))</w:rPr></w:style>
-        <w:style w:type="paragraph" w:styleId="ListParagraph"><w:name w:val="List Paragraph"/><w:basedOn w:val="Normal"/><w:pPr><w:ind w:left="720"/></w:pPr></w:style>
+        <w:style w:type="paragraph" w:styleId="Quote"><w:name w:val="Quote"/><w:basedOn w:val="Normal"/><w:qFormat/><w:pPr>\(spacingXML(for: configuration.blockquote))<w:ind w:left="720"/></w:pPr><w:rPr>\(runFontsXML(for: configuration.blockquote))\(configuration.blockquote.isItalic ? "<w:i/>" : "")<w:color w:val="595959"/></w:rPr></w:style>
+        <w:style w:type="paragraph" w:styleId="CodeBlock"><w:name w:val="Code Block"/><w:basedOn w:val="Normal"/><w:pPr><w:shd w:val="clear" w:color="auto" w:fill="F2F2F2"/>\(spacingXML(for: configuration.code))</w:pPr><w:rPr>\(runFontsXML(for: configuration.code))</w:rPr></w:style>
+        <w:style w:type="paragraph" w:styleId="ListParagraph"><w:name w:val="List Paragraph"/><w:basedOn w:val="Normal"/><w:qFormat/><w:pPr><w:ind w:left="720"/></w:pPr></w:style>
         </w:styles>
         """
         return styles
@@ -209,14 +233,14 @@ struct DocxExporter {
     }
 
     private func spacingXML(for style: ElementStyle) -> String {
-        let before = Int(style.paragraphSpacingBefore * 20)
-        let after = Int(style.paragraphSpacingAfter * 20)
+        let before = Int((style.paragraphSpacingBefore * exportScale * 20).rounded())
+        let after = Int((style.paragraphSpacingAfter * exportScale * 20).rounded())
         return "<w:spacing w:before=\"\(before)\" w:after=\"\(after)\"/>"
     }
 
     private func runFontsXML(for style: ElementStyle) -> String {
         let family = escapeXML(exportFontName(for: style.fontFamily))
-        let halfPoints = Int(style.fontSize * 2)
+        let halfPoints = Int((style.fontSize * exportScale * 2).rounded())
         return "<w:rFonts w:ascii=\"\(family)\" w:hAnsi=\"\(family)\" w:cs=\"\(family)\"/><w:sz w:val=\"\(halfPoints)\"/><w:szCs w:val=\"\(halfPoints)\"/>"
     }
 

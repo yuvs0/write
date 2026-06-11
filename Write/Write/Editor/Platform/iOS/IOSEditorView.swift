@@ -10,9 +10,11 @@ final class WriteUITextView: UITextView {
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        let minimumMargin: CGFloat = traitCollection.userInterfaceIdiom == .pad ? 56 : 20
-        let margin = max(minimumMargin, (bounds.width - Self.columnWidth) / 2).rounded()
-        let insets = UIEdgeInsets(top: 24, left: margin, bottom: 24, right: margin)
+        // Equal padding on all four sides; side margins only grow beyond it
+        // to center the column on wide layouts.
+        let basePadding: CGFloat = traitCollection.userInterfaceIdiom == .pad ? 28 : 20
+        let margin = max(basePadding, (bounds.width - Self.columnWidth) / 2).rounded()
+        let insets = UIEdgeInsets(top: basePadding, left: margin, bottom: basePadding, right: margin)
         if textContainerInset != insets {
             textContainerInset = insets
         }
