@@ -2,7 +2,7 @@ import Foundation
 
 /// The paragraph-level style of a block. Stored on every character of the
 /// paragraph (including its trailing newline) under `.writeBlockStyle`.
-enum BlockStyle: String, CaseIterable, Codable {
+nonisolated enum BlockStyle: String, CaseIterable, Codable {
     case body
     case heading1, heading2, heading3, heading4, heading5, heading6
     case quote
@@ -81,7 +81,7 @@ enum BlockStyle: String, CaseIterable, Codable {
 }
 
 /// Character-level formatting, stored as a bitmask under `.writeInlineTraits`.
-struct InlineTraits: OptionSet, Hashable {
+nonisolated struct InlineTraits: OptionSet, Hashable {
     let rawValue: Int
 
     static let bold = InlineTraits(rawValue: 1 << 0)
@@ -100,6 +100,38 @@ extension NSAttributedString.Key {
     static let writeInlineTraits = NSAttributedString.Key("write.inlineTraits")
     /// String destination of a link.
     static let writeLink = NSAttributedString.Key("write.link")
+    /// JSON-encoded `[CitationRef]` for a citation chip run.
+    static let writeCitation = NSAttributedString.Key("write.citation")
+    /// NSNumber(true) present on every character of paragraphs inside the
+    /// generated bibliography region (including the heading paragraph).
+    static let writeBibliography = NSAttributedString.Key("write.bibliography")
+}
+
+// MARK: - CitationRef JSON helpers
+
+extension Array where Element == CitationRef {
+    /// Encode to a compact, stable JSON string suitable for storage in an
+    /// NSAttributedString attribute value.
+    func encodedJSON() -> String {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        guard let data = try? encoder.encode(self),
+              let string = String(data: data, encoding: .utf8) else {
+            return "[]"
+        }
+        return string
+    }
+}
+
+extension String {
+    /// Decode a JSON string back to `[CitationRef]`.
+    func decodedCitationRefs() -> [CitationRef]? {
+        guard let data = self.data(using: .utf8),
+              let refs = try? JSONDecoder().decode([CitationRef].self, from: data) else {
+            return nil
+        }
+        return refs
+    }
 }
 
 extension NSAttributedString {
@@ -116,6 +148,15 @@ extension NSAttributedString {
               let number = attribute(.writeInlineTraits, at: location, effectiveRange: nil) as? NSNumber
         else { return [] }
         return InlineTraits(rawValue: number.intValue)
+    }
+
+    /// Return the `[CitationRef]` stored at `location`, or nil if that
+    /// position carries no citation attribute.
+    func citationRefs(at location: Int) -> [CitationRef]? {
+        guard location >= 0, location < length,
+              let json = attribute(.writeCitation, at: location, effectiveRange: nil) as? String
+        else { return nil }
+        return json.decodedCitationRefs()
     }
 }
 

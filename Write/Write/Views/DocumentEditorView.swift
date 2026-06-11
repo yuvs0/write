@@ -14,7 +14,11 @@ struct DocumentEditorView: View {
     init(document: Binding<MarkdownDocument>, fileURL: URL? = nil) {
         self._document = document
         self.fileURL = fileURL
-        self._viewModel = State(initialValue: EditorViewModel(markdown: document.wrappedValue.rawText))
+        self._viewModel = State(initialValue: EditorViewModel(
+            markdown: document.wrappedValue.rawText,
+            referencesData: document.wrappedValue.referencesJSON,
+            settingsData: document.wrappedValue.settingsJSON
+        ))
     }
 
     var body: some View {
@@ -25,6 +29,20 @@ struct DocumentEditorView: View {
             .onChange(of: viewModel.styleStore.configuration) {
                 viewModel.refreshStyle()
             }
+            // Sources or style changed: restyle chips + bibliography and write
+            // the updated references/settings back into the document package.
+            .onChange(of: viewModel.referenceStore.revision) {
+                viewModel.refreshCitations()
+                document.referencesJSON = try? viewModel.referenceStore.referencesData()
+                document.settingsJSON = try? viewModel.referenceStore.settingsData()
+            }
+            // A style switch bumps the revision via styleID's setter, but guard
+            // against any path that changes it without bumping revision.
+            .onChange(of: viewModel.referenceStore.styleID) {
+                viewModel.refreshCitations()
+                document.settingsJSON = try? viewModel.referenceStore.settingsData()
+            }
+            .citationErrorAlert(viewModel: viewModel)
             #if os(iOS)
             .sheet(isPresented: $showsSettings) {
                 NavigationStack {
@@ -85,6 +103,7 @@ struct DocumentEditorView: View {
     @ViewBuilder
     private var editorWithChrome: some View {
         editorView
+            .overlay(alignment: .topLeading) { citationPopoverAnchor }
             #if os(macOS)
             .background {
                 VisualEffectBackground()
@@ -115,6 +134,31 @@ struct DocumentEditorView: View {
                 }
             }
             #endif
+    }
+
+    /// A zero-size anchor that hosts the citation popover, positioned at the
+    /// chip's rect within the editor. Driven by `pendingPopoverChipRange`.
+    @ViewBuilder
+    private var citationPopoverAnchor: some View {
+        let presented = Binding(
+            get: { viewModel.pendingPopoverChipRange != nil },
+            set: { if !$0 { viewModel.pendingPopoverChipRange = nil } }
+        )
+        if let chipRange = viewModel.pendingPopoverChipRange,
+           let rect = viewModel.viewRect(forCharacterRange: chipRange) {
+            Color.clear
+                .frame(width: 1, height: 1)
+                .popover(
+                    isPresented: presented,
+                    attachmentAnchor: .rect(.rect(rect)),
+                    arrowEdge: .bottom
+                ) {
+                    CitationPopover(viewModel: viewModel, chipRange: chipRange) {
+                        viewModel.pendingPopoverChipRange = nil
+                    }
+                    .presentationCompactAdaptation(.popover)
+                }
+        }
     }
 
     @ViewBuilder
@@ -148,6 +192,23 @@ struct DocumentEditorView: View {
         switch viewModel.pendingExport {
         case .docx: return base + ".docx"
         default: return base + ".pdf"
+        }
+    }
+}
+
+// MARK: - Citation error surfacing
+
+private extension View {
+    /// Surfaces `viewModel.citationError` as a dismissible alert.
+    func citationErrorAlert(viewModel: EditorViewModel) -> some View {
+        let presented = Binding(
+            get: { viewModel.citationError != nil },
+            set: { if !$0 { viewModel.citationError = nil } }
+        )
+        return alert("Citation", isPresented: presented) {
+            Button("OK", role: .cancel) { viewModel.citationError = nil }
+        } message: {
+            Text(viewModel.citationError ?? "")
         }
     }
 }

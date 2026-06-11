@@ -5,6 +5,13 @@ import SwiftUI
 final class WriteTextView: NSTextView {
     var onPaste: (() -> Void)?
     var onMouseMoved: ((NSPoint?) -> Void)?
+    /// Invoked when ⌘↩ is pressed: convert the token at the caret to a chip.
+    var onCiteShortcut: (() -> Void)?
+    /// Asked whether a click landed on a chip run; if it returns a range, the
+    /// view opens that chip's popover and suppresses caret placement.
+    var chipRangeAtPoint: ((NSPoint) -> NSRange?)?
+    /// Invoked with a chip range to open its locator popover.
+    var onChipClicked: ((NSRange) -> Void)?
 
     /// Width of the text column; side margins grow beyond the base padding
     /// only to center the column. The hover handle floats inside the margin.
@@ -16,10 +23,31 @@ final class WriteTextView: NSTextView {
         onPaste?()
     }
 
+    override func keyDown(with event: NSEvent) {
+        // ⌘↩ converts the URL/DOI token at the caret into a citation chip.
+        let isReturn = event.keyCode == 36 || event.keyCode == 76
+        if isReturn, event.modifierFlags.contains(.command), let onCiteShortcut {
+            onCiteShortcut()
+            return
+        }
+        super.keyDown(with: event)
+    }
+
     /// ⌘-drag adds to the selection instead of replacing it, so formatting
     /// can apply to several stretches of text at once. (TextKit 2 text
     /// views no longer do this themselves.)
     override func mouseDown(with event: NSEvent) {
+        // A plain click on a chip opens its popover instead of placing a caret.
+        if !event.modifierFlags.contains(.command),
+           !event.modifierFlags.contains(.shift),
+           let chipRangeAtPoint {
+            let point = convert(event.locationInWindow, from: nil)
+            if let chipRange = chipRangeAtPoint(point) {
+                onChipClicked?(chipRange)
+                return
+            }
+        }
+
         let isAdditive = event.modifierFlags.contains(.command)
             && !event.modifierFlags.contains(.shift)
         let previousRanges = isAdditive
@@ -117,6 +145,19 @@ struct MacEditorView: NSViewRepresentable {
             viewModel.handleTextChange(editedRange: textView.selectedRange())
         }
 
+        textView.onCiteShortcut = { [weak viewModel] in
+            viewModel?.citeTokenAtCaret()
+        }
+
+        textView.chipRangeAtPoint = { [weak viewModel, weak textView] point in
+            guard let viewModel, let textView else { return nil }
+            return Self.chipRange(at: point, in: textView, viewModel: viewModel)
+        }
+
+        textView.onChipClicked = { [weak viewModel] chipRange in
+            viewModel?.pendingPopoverChipRange = chipRange
+        }
+
         let handle = ParagraphHandleController(viewModel: viewModel, textView: textView)
         textView.onMouseMoved = { [weak handle] point in
             handle?.mouseMoved(to: point)
@@ -131,6 +172,32 @@ struct MacEditorView: NSViewRepresentable {
     }
 
     func updateNSView(_ scrollView: NSScrollView, context: Context) {}
+
+    /// Map a point in the text view to the chip run under it, if any.
+    ///
+    /// `characterIndexForInsertion(at:)` returns the insertion index nearest the
+    /// point; to require the click land *on* a chip (not merely at its edge), we
+    /// also verify the click's vertical position falls within a chip segment's
+    /// frame via the layout manager.
+    private static func chipRange(
+        at point: NSPoint, in textView: NSTextView, viewModel: EditorViewModel
+    ) -> NSRange? {
+        guard let textStorage = viewModel.textContentStorage.textStorage,
+              textStorage.length > 0 else { return nil }
+
+        let index = textView.characterIndexForInsertion(at: point)
+        // characterIndexForInsertion clamps to length; probe both the index and
+        // the character before it (clicking the right half of a chip rounds up).
+        let candidates = [index, index - 1].filter { $0 >= 0 && $0 < textStorage.length }
+        for candidate in candidates {
+            guard let chip = CitationController.chipRange(at: candidate, in: textStorage) else { continue }
+            // Confirm the point is within the chip's laid-out rect.
+            if let rect = viewModel.viewRect(forCharacterRange: chip), rect.contains(point) {
+                return chip
+            }
+        }
+        return nil
+    }
 
     func makeCoordinator() -> Coordinator {
         Coordinator(viewModel: viewModel)
@@ -153,7 +220,21 @@ struct MacEditorView: NSViewRepresentable {
             replacementString: String?
         ) -> Bool {
             lastEditInsertedNewline = replacementString?.contains("\n") ?? false
-            return true
+
+            // Attribute-only changes (nil replacement) bypass interception.
+            guard let replacementString else { return true }
+
+            // Chip atomicity + read-only bibliography enforcement.
+            switch viewModel.decideEdit(range: affectedCharRange, replacement: replacementString) {
+            case .allow:
+                return true
+            case .reject:
+                lastEditInsertedNewline = false
+                return false
+            case .handled:
+                lastEditInsertedNewline = false
+                return false
+            }
         }
 
         func textView(_ textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {

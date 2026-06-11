@@ -6,6 +6,16 @@ import Foundation
 /// typing `*hello*` stores `\*hello\*` and never becomes bold. Formatting
 /// only ever comes from the semantic attributes.
 struct RichTextToMarkdown {
+
+    // MARK: - Block type
+
+    private struct Block {
+        let style: BlockStyle
+        let range: NSRange
+        let contentRange: NSRange
+        let isBibliography: Bool
+    }
+
     func markdown(from attributed: NSAttributedString) -> String {
         let text = attributed.string as NSString
         var paragraphRanges: [NSRange] = []
@@ -20,22 +30,19 @@ struct RichTextToMarkdown {
             return ""
         }
 
-        struct Block {
-            let style: BlockStyle
-            let range: NSRange
-            let contentRange: NSRange
-        }
-
         let blocks: [Block] = paragraphRanges.map { range in
             var contentLength = range.length
             if contentLength > 0, text.character(at: NSMaxRange(range) - 1) == 0x0A {
                 contentLength -= 1
             }
             let style = attributed.blockStyle(at: range.location)
+            let isBib = (attributed.attribute(.writeBibliography, at: range.location,
+                                               effectiveRange: nil) as? NSNumber)?.boolValue == true
             return Block(
                 style: style,
                 range: range,
-                contentRange: NSRange(location: range.location, length: contentLength)
+                contentRange: NSRange(location: range.location, length: contentLength),
+                isBibliography: isBib
             )
         }
 
@@ -44,11 +51,24 @@ struct RichTextToMarkdown {
         while index < blocks.count {
             let block = blocks[index]
 
+            // Bibliography region: collect all consecutive bibliography blocks
+            // and wrap them in markers.
+            if block.isBibliography {
+                var bibBlocks: [Block] = []
+                while index < blocks.count, blocks[index].isBibliography {
+                    bibBlocks.append(blocks[index])
+                    index += 1
+                }
+                output.append(contentsOf: serializeBibliographyRegion(bibBlocks, of: attributed))
+                continue
+            }
+
             switch block.style {
             case .code:
                 // Merge consecutive code paragraphs into one fence.
                 var lines: [String] = []
-                while index < blocks.count, blocks[index].style == .code {
+                while index < blocks.count, blocks[index].style == .code,
+                      !blocks[index].isBibliography {
                     lines.append(text.substring(with: blocks[index].contentRange))
                     index += 1
                 }
@@ -59,7 +79,8 @@ struct RichTextToMarkdown {
             case .numbered:
                 var item = 1
                 var listLines: [String] = []
-                while index < blocks.count, blocks[index].style == .numbered {
+                while index < blocks.count, blocks[index].style == .numbered,
+                      !blocks[index].isBibliography {
                     let content = inlineMarkdown(in: blocks[index].contentRange, of: attributed)
                     listLines.append("\(item). \(content)")
                     item += 1
@@ -70,7 +91,8 @@ struct RichTextToMarkdown {
 
             case .bullet:
                 var listLines: [String] = []
-                while index < blocks.count, blocks[index].style == .bullet {
+                while index < blocks.count, blocks[index].style == .bullet,
+                      !blocks[index].isBibliography {
                     let content = inlineMarkdown(in: blocks[index].contentRange, of: attributed)
                     listLines.append("- \(content)")
                     index += 1
@@ -98,12 +120,35 @@ struct RichTextToMarkdown {
         return output.joined(separator: "\n\n")
     }
 
+    // MARK: - Bibliography region serialization
+
+    private func serializeBibliographyRegion(
+        _ blocks: [Block],
+        of attributed: NSAttributedString
+    ) -> [String] {
+        var parts: [String] = ["<!-- references:begin -->"]
+        for block in blocks {
+            switch block.style {
+            case .heading1, .heading2, .heading3, .heading4, .heading5, .heading6:
+                let level = block.style.headingLevel ?? 2
+                let content = inlineMarkdown(in: block.contentRange, of: attributed)
+                parts.append(String(repeating: "#", count: level) + " " + content)
+            default:
+                let content = inlineMarkdown(in: block.contentRange, of: attributed)
+                parts.append(content.isEmpty ? MarkdownToRichText.blankLineMarker : content)
+            }
+        }
+        parts.append("<!-- references:end -->")
+        return parts
+    }
+
     // MARK: - Inline runs
 
     private struct Run {
         var text: String
         var traits: InlineTraits
         var link: String?
+        var citationRefs: [CitationRef]?
     }
 
     private func inlineMarkdown(in range: NSRange, of attributed: NSAttributedString) -> String {
@@ -114,11 +159,18 @@ struct RichTextToMarkdown {
             let text = (attributed.string as NSString).substring(with: runRange)
             let traits = attrs.inlineTraits
             let link = attrs[.writeLink] as? String
-            if var last = runs.last, last.traits == traits, last.link == link {
+            let citJSON = attrs[.writeCitation] as? String
+            let citRefs = citJSON.flatMap { $0.decodedCitationRefs() }
+
+            // Citation chip runs are never merged with adjacent runs.
+            if citRefs != nil {
+                runs.append(Run(text: text, traits: traits, link: link, citationRefs: citRefs))
+            } else if var last = runs.last, last.traits == traits, last.link == link,
+                      last.citationRefs == nil {
                 last.text += text
                 runs[runs.count - 1] = last
             } else {
-                runs.append(Run(text: text, traits: traits, link: link))
+                runs.append(Run(text: text, traits: traits, link: link, citationRefs: nil))
             }
         }
 
@@ -130,6 +182,11 @@ struct RichTextToMarkdown {
     }
 
     private func render(_ run: Run) -> String {
+        // Citation chip runs are serialized as Pandoc citation syntax.
+        if let refs = run.citationRefs {
+            return pandocCitation(refs)
+        }
+
         // Emphasis delimiters don't tolerate adjacent whitespace, so spaces
         // at the edges of a styled run are emitted outside the markers.
         let scalars = run.text
@@ -157,6 +214,26 @@ struct RichTextToMarkdown {
         }
 
         return leading + rendered + trailing
+    }
+
+    /// Emit a Pandoc citation string for one or more refs.
+    /// e.g. `[@smith2020]`, `[@smith2020, p. 31]`, `[@a; @b, p. 2]`
+    private func pandocCitation(_ refs: [CitationRef]) -> String {
+        let parts = refs.map { ref -> String in
+            var part = "@\(ref.itemID)"
+            if let locator = ref.locator, !locator.isEmpty {
+                let prefix: String
+                switch ref.label ?? "page" {
+                case "page":   prefix = "p."
+                case "chapter": prefix = "chap."
+                case "section": prefix = "sec."
+                default:       prefix = ref.label ?? "page"
+                }
+                part += ", \(prefix) \(locator)"
+            }
+            return part
+        }
+        return "[\(parts.joined(separator: "; "))]"
     }
 
     private func renderInlineCode(_ text: String) -> String {

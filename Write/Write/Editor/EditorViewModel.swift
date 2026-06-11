@@ -20,6 +20,12 @@ final class EditorViewModel {
 
     let styleStore: StyleStore
 
+    /// Per-document bibliographic sources and citation style.
+    let referenceStore: ReferenceStore
+
+    /// Owns the live citeproc engine and all citation-specific transforms.
+    let citationController: CitationController
+
     weak var nativeTextView: NativeTextView?
     var savedSelectedRange = NSRange(location: 0, length: 0)
     /// All selection ranges — macOS supports ⌘-click discontiguous
@@ -53,15 +59,34 @@ final class EditorViewModel {
     /// Set by menu commands; observed by the editor view to present an exporter.
     var pendingExport: ExportFormat?
 
+    // MARK: - Citation UI state (observed by the editor view)
+
+    /// True while a ⌘↩ resolution is in flight (shows a spinner near the caret).
+    var isResolvingCitation = false
+    /// Set on resolution failure; the view surfaces it as a small toast/alert.
+    var citationError: String?
+    /// When non-nil, the editor view should present the locator popover anchored
+    /// at this chip range (set right after a ⌘↩ conversion or a chip click).
+    var pendingPopoverChipRange: NSRange?
+
     private let serializer = RichTextToMarkdown()
 
     var styler: RichTextStyler {
         RichTextStyler(configuration: styleStore.configuration, zoomScale: zoomScale)
     }
 
-    init(markdown: String = "", styleStore: StyleStore = .shared) {
+    init(
+        markdown: String = "",
+        styleStore: StyleStore = .shared,
+        referencesData: Data? = nil,
+        settingsData: Data? = nil
+    ) {
         self.markdown = markdown
         self.styleStore = styleStore
+
+        let store = ReferenceStore(referencesData: referencesData, settingsData: settingsData)
+        self.referenceStore = store
+        self.citationController = CitationController(store: store)
 
         let container = NSTextContainer(size: CGSize(width: 0, height: CGFloat.greatestFiniteMagnitude))
         container.widthTracksTextView = true
@@ -84,6 +109,15 @@ final class EditorViewModel {
         let content = MarkdownToRichText().attributedString(from: markdown)
         styler.applyStyles(to: content)
         textStorage.setAttributedString(content)
+
+        // Chips load with placeholder display text "(key)"; re-render them
+        // from the live engine. Only bother if the document actually has
+        // citation content or the store carries sources.
+        let hasChips = CitationController.chipRuns(in: textStorage).isEmpty == false
+        let hasBibliography = CitationController.bibliographyRange(in: textStorage) != nil
+        if hasChips || hasBibliography || !referenceStore.items.isEmpty {
+            refreshCitations()
+        }
     }
 
     // MARK: - Edits
@@ -166,12 +200,31 @@ final class EditorViewModel {
 
     // MARK: - Selection
 
+    /// Guards against re-entrancy when we re-set the selection to snap it out
+    /// of a chip (re-setting fires the platform selection callback again).
+    private var isSnappingSelection = false
+
     func selectionDidChange(_ range: NSRange) {
         selectionDidChange(ranges: [range])
     }
 
     func selectionDidChange(ranges: [NSRange]) {
-        savedSelectedRanges = ranges.isEmpty ? [NSRange(location: 0, length: 0)] : ranges
+        var ranges = ranges.isEmpty ? [NSRange(location: 0, length: 0)] : ranges
+
+        // Snap any endpoint that landed strictly inside a chip out to the chip
+        // boundary, so chips behave atomically. If the snap changed anything,
+        // push it back onto the text view (guarded against recursion).
+        if !isSnappingSelection, let textStorage = textContentStorage.textStorage {
+            let snapped = ranges.map { CitationController.snapOutOfChips($0, in: textStorage) }
+            if snapped != ranges {
+                ranges = snapped
+                isSnappingSelection = true
+                applySelectionToTextView(ranges)
+                isSnappingSelection = false
+            }
+        }
+
+        savedSelectedRanges = ranges
         let range = savedSelectedRanges[0]
         savedSelectedRange = range
         guard let textStorage = textContentStorage.textStorage else { return }
@@ -188,6 +241,52 @@ final class EditorViewModel {
             activeTraits = textStorage.inlineTraits(at: location - 1)
         } else {
             activeTraits = []
+        }
+
+        // Typing right after a chip, or at the edge of the bibliography region,
+        // must not inherit those attributes. Strip them from typingAttributes.
+        if range.length == 0 {
+            stripBoundaryTypingAttributes(at: location, in: textStorage)
+        }
+    }
+
+    /// Push `ranges` back onto the native text view (used by selection snapping).
+    private func applySelectionToTextView(_ ranges: [NSRange]) {
+        #if os(macOS)
+        guard let textView = nativeTextView else { return }
+        textView.setSelectedRanges(
+            ranges.map { NSValue(range: $0) }, affinity: .downstream, stillSelecting: false
+        )
+        #else
+        guard let textView = nativeTextView else { return }
+        textView.selectedRange = ranges.first ?? NSRange(location: 0, length: 0)
+        #endif
+    }
+
+    /// Remove `.writeCitation` / `.writeBibliography` from the text view's
+    /// typingAttributes when the caret abuts a chip or the bibliography region,
+    /// so new typing never adopts those attributes.
+    private func stripBoundaryTypingAttributes(at location: Int, in textStorage: NSTextStorage) {
+        guard let textView = nativeTextView else { return }
+        var typing = textView.typingAttributes
+        var changed = false
+
+        if typing[.writeCitation] != nil {
+            // Typing never continues a chip — always strip the attribute when
+            // the caret abuts one (selection snapping keeps us at boundaries).
+            typing.removeValue(forKey: .writeCitation)
+            changed = true
+        }
+        // At the outer edges of the bibliography region, escape the read-only
+        // region by dropping its attribute from new typing.
+        if typing[.writeBibliography] != nil,
+           let region = CitationController.bibliographyRange(in: textStorage),
+           location <= region.location || location >= NSMaxRange(region) {
+            typing.removeValue(forKey: .writeBibliography)
+            changed = true
+        }
+        if changed {
+            textView.typingAttributes = typing
         }
     }
 
@@ -498,6 +597,14 @@ final class EditorViewModel {
     /// Scrolls so the heading sits about three lines from the top, and
     /// places the caret on it.
     func scrollToHeading(at paragraphRange: NSRange) {
+        scrollTo(range: paragraphRange)
+    }
+
+    /// Scrolls so `range` sits about three lines from the top, and places the
+    /// caret at its start. Generalizes the heading-scroll machinery so it also
+    /// serves citation jumps.
+    func scrollTo(range targetRange: NSRange) {
+        let paragraphRange = targetRange
         let contentStorage = textContentStorage
         let documentStart = contentStorage.documentRange.location
         guard let target = contentStorage.location(documentStart, offsetBy: paragraphRange.location),
@@ -554,8 +661,447 @@ final class EditorViewModel {
         case .pdf:
             return PDFExporter(configuration: styleStore.configuration).pdfData(from: content)
         case .docx:
-            return DocxExporter(configuration: styleStore.configuration).docxData(from: content)
+            let references = referenceStore.items.isEmpty ? nil : ReferenceExportContext(
+                items: referenceStore.items,
+                styleID: referenceStore.styleID
+            )
+            return DocxExporter(
+                configuration: styleStore.configuration,
+                references: references
+            ).docxData(from: content)
         }
+    }
+
+    // MARK: - Citations
+
+    /// Refresh the engine, re-render every chip from live citeproc output,
+    /// regenerate the bibliography region if present, then re-style and
+    /// serialize. This is a programmatic pass — done directly on the storage,
+    /// not via the undo machinery (chip text is generated, not user-authored).
+    func refreshCitations() {
+        guard let textStorage = textContentStorage.textStorage else { return }
+        let engine = citationController.currentEngine()
+
+        textStorage.beginEditing()
+        let chipsChanged = CitationController.rerenderChips(in: textStorage, engine: engine)
+        let bibChanged = CitationController.regenerateBibliography(in: textStorage, engine: engine)
+        textStorage.endEditing()
+
+        guard chipsChanged || bibChanged else { return }
+
+        // Re-style the whole document: chip and bibliography paragraph lengths
+        // may have shifted, and styling is cheap relative to a citeproc pass.
+        textStorage.beginEditing()
+        styler.applyStyles(to: textStorage)
+        textStorage.endEditing()
+
+        serialize()
+    }
+
+    /// Regenerate just the bibliography region (no chip pass). Used when the
+    /// caller knows only sources/style changed via a path that already handled
+    /// chips, or as a lightweight hook.
+    func regenerateBibliographyIfPresent() {
+        guard let textStorage = textContentStorage.textStorage else { return }
+        let engine = citationController.currentEngine()
+        textStorage.beginEditing()
+        let changed = CitationController.regenerateBibliography(in: textStorage, engine: engine)
+        textStorage.endEditing()
+        guard changed else { return }
+        textStorage.beginEditing()
+        styler.applyStyles(to: textStorage)
+        textStorage.endEditing()
+        serialize()
+    }
+
+    /// Switch the document's citation style and restyle all chips + bibliography.
+    func setCitationStyle(_ styleID: String) {
+        guard styleID != referenceStore.styleID else { return }
+        referenceStore.styleID = styleID
+        // The style change bumps the store revision; the view layer's onChange
+        // will call refreshCitations(). Call it directly too so menu-driven
+        // changes take effect even if no observer is attached yet.
+        refreshCitations()
+    }
+
+    // MARK: - Bibliography insertion
+
+    /// Insert (or replace) the generated references list.
+    ///
+    /// - If a region already exists anywhere in the document, it is replaced in
+    ///   place and `atEnd` is ignored.
+    /// - Otherwise the region is inserted at the document end (`atEnd == true`)
+    ///   or at the start of the caret's paragraph (`atEnd == false`), with a
+    ///   blank body paragraph separating it from preceding content.
+    func insertReferencesList(atEnd: Bool) {
+        guard let textStorage = textContentStorage.textStorage else { return }
+        let engine = citationController.currentEngine()
+
+        // Replace in place if a region exists.
+        if CitationController.bibliographyRange(in: textStorage) != nil {
+            regenerateBibliographyIfPresent()
+            return
+        }
+
+        let entries = engine?.bibliography() ?? []
+        let region = CitationController.makeBibliographyRegion(entries: entries)
+
+        let nsText = textStorage.string as NSString
+        let insertionPoint: Int
+        if atEnd || nsText.length == 0 {
+            insertionPoint = nsText.length
+        } else {
+            let caret = min(savedSelectedRange.location, nsText.length)
+            insertionPoint = nsText.paragraphRange(for: NSRange(location: caret, length: 0)).location
+        }
+
+        // Build the fragment: a blank separator paragraph (unless inserting into
+        // an empty document or at the very start) + the region + a trailing
+        // newline so following content stays in its own paragraph.
+        let fragment = NSMutableAttributedString()
+        let needsLeadingSeparator = insertionPoint > 0
+        if needsLeadingSeparator {
+            fragment.append(NSAttributedString(
+                string: "\n", attributes: [.writeBlockStyle: BlockStyle.body.rawValue]
+            ))
+            fragment.append(NSAttributedString(
+                string: "\n", attributes: [.writeBlockStyle: BlockStyle.body.rawValue]
+            ))
+        }
+        fragment.append(region)
+        // Trailing newline if we are not at document end, to terminate the region.
+        if insertionPoint < nsText.length {
+            fragment.append(NSAttributedString(
+                string: "\n",
+                attributes: [
+                    .writeBlockStyle: BlockStyle.body.rawValue,
+                    .writeBibliography: NSNumber(true),
+                ]
+            ))
+        }
+
+        performCitationReplacement(
+            range: NSRange(location: insertionPoint, length: 0),
+            with: fragment,
+            actionName: "Insert References List"
+        )
+    }
+
+    // MARK: - ⌘↩ citation creation
+
+    /// Convert a URL/DOI/arXiv/ISBN token at (or just before) the caret into a
+    /// citation chip. Resolves metadata off the main actor, dedupes against the
+    /// store, then replaces the token with a chip on the main actor.
+    func citeTokenAtCaret() {
+        guard !isResolvingCitation,
+              let textStorage = textContentStorage.textStorage else { return }
+        let nsText = textStorage.string as NSString
+        let caret = min(savedSelectedRange.location, nsText.length)
+        let paragraph = nsText.paragraphRange(for: NSRange(location: caret, length: 0))
+        var contentLength = paragraph.length
+        if contentLength > 0, nsText.character(at: NSMaxRange(paragraph) - 1) == 0x0A {
+            contentLength -= 1
+        }
+        let contentRange = NSRange(location: paragraph.location, length: contentLength)
+        let paragraphText = nsText.substring(with: contentRange)
+
+        guard let token = CitationController.detectToken(
+            inParagraph: paragraphText, paragraphRange: contentRange, caret: caret
+        ) else {
+            citationError = "No link or DOI found near the cursor to cite."
+            return
+        }
+
+        isResolvingCitation = true
+        citationError = nil
+        let tokenRange = token.range
+        let input = token.input
+        let resolver = MetadataResolver()
+
+        Task { [weak self] in
+            do {
+                let resolved = try await resolver.resolve(input)
+                await MainActor.run {
+                    self?.finishCitation(resolved: resolved, input: input, tokenRange: tokenRange)
+                }
+            } catch {
+                let reason = (error as? LocalizedError)?.errorDescription
+                    ?? "Couldn't resolve the source."
+                await MainActor.run {
+                    self?.isResolvingCitation = false
+                    self?.citationError = reason
+                }
+            }
+        }
+    }
+
+    /// Main-actor continuation of `citeTokenAtCaret`: dedupe, insert the chip.
+    private func finishCitation(
+        resolved: CSLItem, input: MetadataResolver.Input, tokenRange: NSRange
+    ) {
+        isResolvingCitation = false
+        guard let textStorage = textContentStorage.textStorage else { return }
+
+        // Dedupe by DOI/URL, else add (which generates a citekey).
+        let stored: CSLItem
+        if let doi = resolved.doi, let existing = referenceStore.find(doi: doi) {
+            stored = existing
+        } else if let url = resolved.url, let existing = referenceStore.find(url: url) {
+            stored = existing
+        } else {
+            stored = referenceStore.add(resolved)
+        }
+
+        // Build the chip from the live engine (placeholder if it fails).
+        let refs = [CitationRef(itemID: stored.id, locator: nil, label: nil)]
+        let engine = citationController.currentEngine()
+        let display = engine?.inlineCitation(refs) ?? "(\(stored.id))"
+
+        // Guard the token range against intervening edits.
+        let safeRange = NSRange(
+            location: min(tokenRange.location, textStorage.length),
+            length: min(tokenRange.length, max(0, textStorage.length - tokenRange.location))
+        )
+        let chip = NSAttributedString(string: display, attributes: [
+            .writeBlockStyle: textStorage.blockStyle(at: safeRange.location).rawValue,
+            .writeCitation: refs.encodedJSON(),
+        ])
+
+        performCitationReplacement(range: safeRange, with: chip, actionName: "Add Citation")
+
+        // Trigger the locator popover anchored at the new chip.
+        pendingPopoverChipRange = NSRange(location: safeRange.location, length: chip.length)
+
+        // Regenerate bibliography if present (new source may belong in it).
+        regenerateBibliographyIfPresent()
+    }
+
+    // MARK: - Chip editing (popover)
+
+    /// Apply edited refs to the chip at `range`: rewrite its `.writeCitation`
+    /// JSON, re-render its text from the engine, restyle, serialize — undo-aware.
+    func updateCitation(at range: NSRange, refs: [CitationRef]) {
+        guard let textStorage = textContentStorage.textStorage,
+              NSMaxRange(range) <= textStorage.length else { return }
+        let engine = citationController.currentEngine()
+        let display = engine?.inlineCitation(refs) ?? (textStorage.string as NSString).substring(with: range)
+        var attrs = textStorage.attributes(at: range.location, effectiveRange: nil)
+        attrs[.writeCitation] = refs.encodedJSON()
+        let chip = NSAttributedString(string: display, attributes: attrs)
+        performCitationReplacement(range: range, with: chip, actionName: "Edit Citation")
+    }
+
+    /// Remove the chip at `range`, deleting its characters entirely. Undo-aware.
+    func removeCitation(at range: NSRange) {
+        guard let textStorage = textContentStorage.textStorage,
+              NSMaxRange(range) <= textStorage.length else { return }
+        performCitationReplacement(
+            range: range, with: NSAttributedString(string: ""), actionName: "Remove Citation"
+        )
+        regenerateBibliographyIfPresent()
+    }
+
+    /// The refs stored on the chip at `range`, or nil.
+    func citationRefs(at range: NSRange) -> [CitationRef]? {
+        guard let textStorage = textContentStorage.textStorage,
+              range.location < textStorage.length else { return nil }
+        return textStorage.citationRefs(at: range.location)
+    }
+
+    /// The source backing the chip at `range`'s first ref, for the popover.
+    func citationSource(at range: NSRange) -> CSLItem? {
+        guard let first = citationRefs(at: range)?.first else { return nil }
+        return referenceStore.item(id: first.itemID)
+    }
+
+    // MARK: - Undo-aware character replacement (chips)
+
+    /// Set while a programmatic chip replacement is running, so the platform
+    /// `shouldChangeText` hook lets our own `shouldChangeText` call through
+    /// without re-running interception (it would otherwise recurse).
+    private(set) var isPerformingCitationEdit = false
+
+    /// Replace `range` with `replacement`, routing through the text view so
+    /// ⌘Z restores the prior characters. Restyles the touched paragraphs and
+    /// serializes. Used for all chip insert/edit/remove operations.
+    private func performCitationReplacement(
+        range: NSRange, with replacement: NSAttributedString, actionName: String
+    ) {
+        guard let textStorage = textContentStorage.textStorage,
+              NSMaxRange(range) <= textStorage.length else { return }
+
+        #if os(macOS)
+        if let textView = nativeTextView {
+            isPerformingCitationEdit = true
+            defer { isPerformingCitationEdit = false }
+            guard textView.shouldChangeText(in: range, replacementString: replacement.string) else { return }
+            textStorage.beginEditing()
+            textStorage.replaceCharacters(in: range, with: replacement)
+            textStorage.endEditing()
+            textView.didChangeText()
+        } else {
+            textStorage.beginEditing()
+            textStorage.replaceCharacters(in: range, with: replacement)
+            textStorage.endEditing()
+        }
+        #else
+        let before = textStorage.attributedSubstring(from: range)
+        let newRange = NSRange(location: range.location, length: replacement.length)
+        textStorage.beginEditing()
+        textStorage.replaceCharacters(in: range, with: replacement)
+        textStorage.endEditing()
+        if let undoManager = nativeTextView?.undoManager {
+            undoManager.registerUndo(withTarget: self) { target in
+                target.performCitationReplacement(
+                    range: newRange, with: before, actionName: actionName
+                )
+            }
+            undoManager.setActionName(actionName)
+        }
+        #endif
+
+        // Restyle the affected paragraphs and serialize.
+        let touched = NSRange(location: range.location, length: replacement.length)
+        let nsText = textStorage.string as NSString
+        let safeLocation = min(max(0, touched.location), nsText.length)
+        let safeRange = NSRange(
+            location: safeLocation,
+            length: min(touched.length, nsText.length - safeLocation)
+        )
+        textStorage.beginEditing()
+        styler.applyStyles(to: textStorage, in: safeRange)
+        textStorage.endEditing()
+
+        serialize()
+    }
+
+    // MARK: - Edit interception (chip atomicity & read-only bibliography)
+
+    /// Decision returned to the platform `shouldChangeText` hook.
+    enum EditDecision {
+        /// Let the text view perform the edit normally.
+        case allow
+        /// Block the edit entirely (read-only region).
+        case reject
+        /// The view model performed an adjusted edit programmatically; the hook
+        /// should return false.
+        case handled
+    }
+
+    /// Vet a pending edit against chip atomicity and the read-only bibliography.
+    ///
+    /// - Returns `.reject` when the edit intrudes on the bibliography region
+    ///   without covering it.
+    /// - Returns `.handled` when the edit partially intersects chip runs (or is
+    ///   a backspace right after a chip): the range is expanded to whole chips
+    ///   and the replacement performed programmatically.
+    /// - Returns `.allow` otherwise.
+    func decideEdit(range: NSRange, replacement: String) -> EditDecision {
+        // Our own programmatic replacement re-enters the hook — let it through.
+        guard !isPerformingCitationEdit else { return .allow }
+        guard let textStorage = textContentStorage.textStorage else { return .allow }
+
+        // Read-only bibliography: reject intrusions that don't cover the region.
+        if !CitationController.editAllowedAgainstBibliography(range, in: textStorage) {
+            return .reject
+        }
+
+        let isDeletion = replacement.isEmpty
+        let expanded = CitationController.expandToCoverChips(
+            range, in: textStorage, isDeletion: isDeletion
+        )
+        guard expanded != range else { return .allow }
+
+        // The edit touches a chip: perform the expanded replacement ourselves.
+        let replacementAttr = NSAttributedString(
+            string: replacement,
+            attributes: replacement.isEmpty ? nil : typingAttributesForEdit(at: expanded.location)
+        )
+        performCitationReplacement(
+            range: expanded, with: replacementAttr,
+            actionName: replacement.isEmpty ? "Delete" : "Replace"
+        )
+        // Place the caret after the inserted text.
+        let caret = expanded.location + replacementAttr.length
+        applySelectionToTextView([NSRange(location: caret, length: 0)])
+        selectionDidChange(NSRange(location: caret, length: 0))
+        return .handled
+    }
+
+    /// Plain block-styled attributes for text typed over a chip boundary —
+    /// never carries `.writeCitation`.
+    private func typingAttributesForEdit(at location: Int) -> [NSAttributedString.Key: Any] {
+        guard let textStorage = textContentStorage.textStorage,
+              textStorage.length > 0 else {
+            return [.writeBlockStyle: activeBlockStyle.rawValue]
+        }
+        let safe = min(max(0, location), textStorage.length - 1)
+        let style = textStorage.blockStyle(at: safe)
+        var attrs: [NSAttributedString.Key: Any] = [.writeBlockStyle: style.rawValue]
+        if !activeTraits.isEmpty {
+            attrs[.writeInlineTraits] = NSNumber(value: activeTraits.rawValue)
+        }
+        return attrs
+    }
+
+    // MARK: - Citation usage & navigation
+
+    /// Map of citekey → ranges of every chip that cites it, for the manager.
+    var citationUsage: [String: [NSRange]] {
+        _ = markdown
+        guard let textStorage = textContentStorage.textStorage else { return [:] }
+        var usage: [String: [NSRange]] = [:]
+        for run in CitationController.chipRuns(in: textStorage) {
+            for ref in run.refs {
+                usage[ref.itemID, default: []].append(run.range)
+            }
+        }
+        return usage
+    }
+
+    /// Scroll a citation chip into view (reusing the heading scroll machinery)
+    /// and place the caret just before it.
+    func jumpToCitation(at range: NSRange) {
+        scrollTo(range: range)
+    }
+
+    // MARK: - View geometry (for the popover)
+
+    /// The on-screen rect (text-view coordinates) of `range`, for anchoring the
+    /// locator popover. Computed from the TextKit 2 layout fragment plus the
+    /// container origin/insets. Nil if layout isn't available.
+    func viewRect(forCharacterRange range: NSRange) -> CGRect? {
+        let contentStorage = textContentStorage
+        let documentStart = contentStorage.documentRange.location
+        guard let start = contentStorage.location(documentStart, offsetBy: range.location),
+              let end = contentStorage.location(start, offsetBy: max(range.length, 1)),
+              let textRange = NSTextRange(location: start, end: end) else { return nil }
+
+        textLayoutManager.ensureLayout(for: textRange)
+
+        var rect: CGRect?
+        textLayoutManager.enumerateTextSegments(
+            in: textRange, type: .standard, options: []
+        ) { _, segmentFrame, _, _ in
+            rect = rect.map { $0.union(segmentFrame) } ?? segmentFrame
+            return true
+        }
+        guard var frame = rect else { return nil }
+
+        #if os(macOS)
+        if let textView = nativeTextView {
+            let origin = textView.textContainerOrigin
+            frame = frame.offsetBy(dx: origin.x, dy: origin.y)
+        }
+        #else
+        if let textView = nativeTextView {
+            frame = frame.offsetBy(
+                dx: textView.textContainerInset.left,
+                dy: textView.textContainerInset.top
+            )
+        }
+        #endif
+        return frame
     }
 }
 

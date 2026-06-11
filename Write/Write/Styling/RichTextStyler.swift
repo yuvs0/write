@@ -125,13 +125,23 @@ struct RichTextStyler {
     ) {
         guard paragraph.length > 0 else { return }
 
-        let paragraphStyle = self.paragraphStyle(for: blockStyle, numberedItem: numberedItem)
+        // Bibliography *body* paragraphs (the entries, not the heading) get a
+        // hanging indent so wrapped lines align under the first.
+        let isBibEntry = blockStyle == .body
+            && (storage.attribute(.writeBibliography, at: paragraph.location, effectiveRange: nil)
+                as? NSNumber)?.boolValue == true
+        let paragraphStyle = self.paragraphStyle(
+            for: blockStyle, numberedItem: numberedItem, hangingIndent: isBibEntry
+        )
         storage.addAttribute(.paragraphStyle, value: paragraphStyle, range: paragraph)
 
         storage.enumerateAttributes(in: paragraph, options: []) { attrs, runRange, _ in
             let traits = attrs.inlineTraits
             let link = attrs[.writeLink] as? String
-            var visual = visualAttributes(blockStyle: blockStyle, traits: traits, link: link)
+            let isChip = attrs[.writeCitation] is String
+            var visual = visualAttributes(
+                blockStyle: blockStyle, traits: traits, link: link, isChip: isChip
+            )
             visual[.paragraphStyle] = paragraphStyle
 
             // Clear stale visual attributes before applying fresh ones.
@@ -146,7 +156,8 @@ struct RichTextStyler {
     private func visualAttributes(
         blockStyle: BlockStyle,
         traits: InlineTraits,
-        link: String?
+        link: String?,
+        isChip: Bool = false
     ) -> [NSAttributedString.Key: Any] {
         let base = elementStyle(for: blockStyle)
         var attributes: [NSAttributedString.Key: Any] = [:]
@@ -191,6 +202,11 @@ struct RichTextStyler {
         if link != nil {
             attributes[.foregroundColor] = linkColor
             attributes[.underlineStyle] = NSUnderlineStyle.single.rawValue
+        } else if isChip {
+            // Chips read as a subtle, atomic token: accent-tinted text + a
+            // faint accent background, keeping the paragraph's font.
+            attributes[.foregroundColor] = chipColor
+            attributes[.backgroundColor] = chipBackgroundColor
         } else {
             attributes[.foregroundColor] = textColor(for: blockStyle)
         }
@@ -198,7 +214,9 @@ struct RichTextStyler {
         return attributes
     }
 
-    private func paragraphStyle(for blockStyle: BlockStyle, numberedItem: Int) -> NSParagraphStyle {
+    private func paragraphStyle(
+        for blockStyle: BlockStyle, numberedItem: Int, hangingIndent: Bool = false
+    ) -> NSParagraphStyle {
         let base = elementStyle(for: blockStyle)
         let style = NSMutableParagraphStyle()
         style.paragraphSpacingBefore = base.paragraphSpacingBefore * zoomScale
@@ -219,6 +237,12 @@ struct RichTextStyler {
             style.textLists = [list]
         default:
             break
+        }
+
+        // Bibliography entries hang: first line flush, continuations indented.
+        if hangingIndent {
+            style.firstLineHeadIndent = 0
+            style.headIndent = 24 * zoomScale
         }
         return style
     }
@@ -248,6 +272,30 @@ struct RichTextStyler {
         return NativeColor.labelColor.withAlphaComponent(0.07)
         #else
         return NativeColor.label.withAlphaComponent(0.07)
+        #endif
+    }
+
+    /// Accent-tinted text color for citation chips.
+    private var chipColor: NativeColor {
+        if forExport {
+            // Chips render as plain body text in exports (the formatted text is
+            // already the content); avoid a stray accent color on paper.
+            return NativeColor.black
+        }
+        #if os(macOS)
+        return NativeColor.controlAccentColor
+        #else
+        return NativeColor.tintColor
+        #endif
+    }
+
+    /// Faint accent background that makes chips read as atomic tokens.
+    private var chipBackgroundColor: NativeColor {
+        if forExport { return NativeColor.clear }
+        #if os(macOS)
+        return NativeColor.controlAccentColor.withAlphaComponent(0.10)
+        #else
+        return NativeColor.tintColor.withAlphaComponent(0.12)
         #endif
     }
 }
