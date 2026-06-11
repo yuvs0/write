@@ -29,10 +29,9 @@ struct DocumentEditorView: View {
                 viewModel.refreshStyle()
             }
             #if os(macOS)
-            .overlay(alignment: .topTrailing) {
+            .overlay(alignment: .bottom) {
                 CollapsibleToolbar(viewModel: viewModel)
-                    .padding(.top, 10)
-                    .padding(.trailing, 16)
+                    .padding(.bottom, 16)
             }
             #else
             .toolbar {

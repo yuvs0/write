@@ -12,7 +12,11 @@ import SwiftUI
 struct CollapsibleToolbar: View {
     @Bindable var viewModel: EditorViewModel
     @State private var isExpanded = false
+    @State private var collapseTask: Task<Void, Never>?
     @Namespace private var glassNamespace
+
+    /// How long the bar stays expanded after the pointer leaves.
+    private static let collapseGracePeriod: Duration = .seconds(10)
 
     var body: some View {
         GlassEffectContainer {
@@ -32,8 +36,22 @@ struct CollapsibleToolbar: View {
             }
         }
         .onHover { hovering in
-            withAnimation(.smooth(duration: 0.3)) {
-                isExpanded = hovering
+            collapseTask?.cancel()
+            collapseTask = nil
+            if hovering {
+                withAnimation(.smooth(duration: 0.3)) {
+                    isExpanded = true
+                }
+            } else {
+                // Linger so the bar doesn't vanish the moment the pointer
+                // slips out; hovering back in cancels the collapse.
+                collapseTask = Task { @MainActor in
+                    try? await Task.sleep(for: Self.collapseGracePeriod)
+                    guard !Task.isCancelled else { return }
+                    withAnimation(.smooth(duration: 0.3)) {
+                        isExpanded = false
+                    }
+                }
             }
         }
     }
