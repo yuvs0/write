@@ -28,12 +28,14 @@ struct DocumentEditorView: View {
             .onChange(of: viewModel.styleStore.configuration) {
                 viewModel.refreshStyle()
             }
+            #if os(macOS)
+            .overlay(alignment: .topTrailing) {
+                CollapsibleToolbar(viewModel: viewModel)
+                    .padding(.top, 10)
+                    .padding(.trailing, 16)
+            }
+            #else
             .toolbar {
-                #if os(macOS)
-                ToolbarItem(placement: .primaryAction) {
-                    CollapsibleToolbar(viewModel: viewModel)
-                }
-                #else
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
                         showsSettings = true
@@ -41,8 +43,8 @@ struct DocumentEditorView: View {
                         Label("Style Settings", systemImage: "textformat.alt")
                     }
                 }
-                #endif
             }
+            #endif
             #if os(iOS)
             .sheet(isPresented: $showsSettings) {
                 NavigationStack {
