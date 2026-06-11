@@ -44,6 +44,9 @@ final class EditorViewModel {
     var showsStatsChip = EditorViewModel.uiDefault("write.ui.showsStatsChip", true) {
         didSet { UserDefaults.standard.set(showsStatsChip, forKey: "write.ui.showsStatsChip") }
     }
+    var showsReferenceManager = EditorViewModel.uiDefault("write.ui.showsReferenceManager", false) {
+        didSet { UserDefaults.standard.set(showsReferenceManager, forKey: "write.ui.showsReferenceManager") }
+    }
 
     private static func uiDefault(_ key: String, _ fallback: Bool) -> Bool {
         UserDefaults.standard.object(forKey: key) as? Bool ?? fallback

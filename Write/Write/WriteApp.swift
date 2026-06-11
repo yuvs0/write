@@ -56,6 +56,27 @@ struct FormatCommands: Commands {
             blockStyleButton(.numbered, shortcut: "7")
             blockStyleButton(.quote, shortcut: "9")
             blockStyleButton(.code, shortcut: "c")
+
+            Divider()
+
+            // ⌥⌘R — insert at cursor
+            Button("Insert References List at Cursor") {
+                viewModel?.insertReferencesList(atEnd: false)
+            }
+            .keyboardShortcut("r", modifiers: [.option, .command])
+
+            // ⌥⇧⌘R — insert at end
+            Button("Insert References List at End") {
+                viewModel?.insertReferencesList(atEnd: true)
+            }
+            .keyboardShortcut("r", modifiers: [.option, .shift, .command])
+
+            // ⌘↩ is already handled inside the text view. Giving the same
+            // shortcut to a menu item on macOS would steal it from the text
+            // view, so this item has no keyboard shortcut.
+            Button("Cite Link at Cursor") {
+                viewModel?.citeTokenAtCaret()
+            }
         }
     }
 
@@ -104,6 +125,8 @@ struct ViewCommands: Commands {
                 .keyboardShortcut("2", modifiers: [.command, .control])
             Toggle("Statistics", isOn: visibility(\.showsStatsChip))
                 .keyboardShortcut("3", modifiers: [.command, .control])
+            Toggle("References", isOn: visibility(\.showsReferenceManager))
+                .keyboardShortcut("4", modifiers: [.command, .control])
             Divider()
         }
     }

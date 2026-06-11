@@ -10,6 +10,7 @@ struct DocumentEditorView: View {
 
     @State private var viewModel: EditorViewModel
     @State private var showsSettings = false
+    @State private var showsReferencesSheet = false
 
     init(document: Binding<MarkdownDocument>, fileURL: URL? = nil) {
         self._document = document
@@ -87,9 +88,29 @@ struct DocumentEditorView: View {
                     .navigationSplitViewColumnWidth(min: 180, ideal: 230, max: 320)
             } detail: {
                 editorWithChrome
+                    .inspector(isPresented: $viewModel.showsReferenceManager) {
+                        ReferenceManagerView(viewModel: viewModel)
+                            .inspectorColumnWidth(min: 280, ideal: 320, max: 420)
+                    }
             }
         } else {
+            #if os(iOS)
             editorWithChrome
+                .sheet(isPresented: $showsReferencesSheet) {
+                    NavigationStack {
+                        ReferenceManagerView(viewModel: viewModel)
+                            .navigationTitle("References")
+                            .navigationBarTitleDisplayMode(.inline)
+                            .toolbar {
+                                ToolbarItem(placement: .confirmationAction) {
+                                    Button("Done") { showsReferencesSheet = false }
+                                }
+                            }
+                    }
+                }
+            #else
+            editorWithChrome
+            #endif
         }
     }
 
@@ -130,6 +151,15 @@ struct DocumentEditorView: View {
                         showsSettings = true
                     } label: {
                         Label("Style Settings", systemImage: "textformat.alt")
+                    }
+                }
+                if !showsDesktopChrome {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button {
+                            showsReferencesSheet = true
+                        } label: {
+                            Label("References", systemImage: "books.vertical")
+                        }
                     }
                 }
             }
