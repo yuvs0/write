@@ -25,10 +25,14 @@ final class WriteUITextView: UITextView {
     override func layoutSubviews() {
         super.layoutSubviews()
         // Equal padding on all four sides; side margins only grow beyond it
-        // to center the column on wide layouts.
-        let basePadding: CGFloat = traitCollection.userInterfaceIdiom == .pad ? 28 : 20
+        // to center the column on wide layouts. iPad adds top clearance so
+        // text doesn't slide under the floating back/title pill (its
+        // navigation bar is hidden and reserves no space).
+        let isPad = UIDevice.current.userInterfaceIdiom == .pad
+        let basePadding: CGFloat = isPad ? 28 : 20
+        let topPadding: CGFloat = isPad ? 64 : basePadding
         let margin = max(basePadding, (bounds.width - Self.columnWidth) / 2).rounded()
-        let insets = UIEdgeInsets(top: basePadding, left: margin, bottom: basePadding, right: margin)
+        let insets = UIEdgeInsets(top: topPadding, left: margin, bottom: basePadding, right: margin)
         if textContainerInset != insets {
             textContainerInset = insets
         }
@@ -110,7 +114,9 @@ struct IOSEditorView: UIViewRepresentable {
         // iPhone only: iPad already shows the system shortcut bar above the
         // keyboard (whose B/I/U route to our toggles) plus the floating
         // formatting bar — stacking ours under those doubles the controls.
-        if textView.traitCollection.userInterfaceIdiom == .phone {
+        // (UIDevice, not traitCollection: traits aren't resolved until the
+        // view joins a window, so they misreport here.)
+        if UIDevice.current.userInterfaceIdiom == .phone {
             textView.inputAccessoryView = FormattingAccessoryBar.make(viewModel: viewModel)
         }
 

@@ -9,6 +9,8 @@ struct DocumentEditorView: View {
     @Binding var document: MarkdownDocument
     var fileURL: URL?
 
+    @Environment(\.openWindow) private var openWindow
+
     @State private var viewModel: EditorViewModel
     @State private var showsSettings = false
     @State private var showsReferencesSheet = false
@@ -53,6 +55,22 @@ struct DocumentEditorView: View {
                 document.assets = viewModel.assets
             }
             .citationErrorAlert(viewModel: viewModel)
+            // Auxiliary scenes (iPad references window) find this document's
+            // live view model through the registry.
+            .onAppear {
+                if let fileURL {
+                    DocumentRegistry.shared.register(viewModel, for: fileURL)
+                }
+            }
+            .onDisappear {
+                if let fileURL {
+                    DocumentRegistry.shared.unregister(url: fileURL)
+                }
+            }
+            .onChange(of: fileURL) { old, new in
+                if let old { DocumentRegistry.shared.unregister(url: old) }
+                if let new { DocumentRegistry.shared.register(viewModel, for: new) }
+            }
             #if os(iOS)
             .onChange(of: viewModel.requestsStyleSettings) { _, requested in
                 if requested {
@@ -196,8 +214,9 @@ struct DocumentEditorView: View {
                 }
             }
             #if os(iOS)
-            // iPad floats a sidebar toggle (its split-view bar is hidden);
-            // text style settings live in the menu bar there. iPhone keeps
+            // iPad floats its window controls in one band aligned with the
+            // system back/title pill (its split-view bar is hidden); text
+            // style settings live in the menu bar there. iPhone keeps
             // navigation-bar buttons.
             .overlay(alignment: .topLeading) {
                 if showsDesktopChrome {
@@ -206,13 +225,30 @@ struct DocumentEditorView: View {
                     } label: {
                         Image(systemName: "sidebar.leading")
                             .font(.system(size: 15, weight: .medium))
-                            .frame(width: 36, height: 36)
+                            .frame(width: 38, height: 38)
                             .contentShape(.circle)
                     }
                     .buttonStyle(.plain)
                     .glassEffect(.regular.interactive(), in: .circle)
-                    .padding(.top, 12)
+                    .padding(.top, 8)
                     .padding(.leading, 14)
+                }
+            }
+            .overlay(alignment: .topTrailing) {
+                if showsDesktopChrome {
+                    Button {
+                        openReferences()
+                    } label: {
+                        Image(systemName: "books.vertical")
+                            .font(.system(size: 15, weight: .medium))
+                            .frame(width: 38, height: 38)
+                            .contentShape(.circle)
+                    }
+                    .buttonStyle(.plain)
+                    .glassEffect(.regular.interactive(), in: .circle)
+                    .padding(.top, 8)
+                    .padding(.trailing, 14)
+                    .help("References")
                 }
             }
             .toolbar {
@@ -269,6 +305,21 @@ struct DocumentEditorView: View {
         #else
         IOSEditorView(viewModel: viewModel)
             .ignoresSafeArea()
+        #endif
+    }
+
+    /// iPad: open the references manager as its own window so it can sit in
+    /// Split View or Slide Over beside the document. Unsaved documents have
+    /// no URL for the registry, so they fall back to the inline inspector.
+    private func openReferences() {
+        #if os(iOS)
+        if let fileURL {
+            openWindow(id: "references", value: fileURL)
+        } else {
+            viewModel.showsReferenceManager.toggle()
+        }
+        #else
+        viewModel.showsReferenceManager.toggle()
         #endif
     }
 

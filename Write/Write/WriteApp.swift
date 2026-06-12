@@ -20,6 +20,12 @@ struct WriteApp: App {
                 .frame(minWidth: 540, minHeight: 480)
         }
         #endif
+
+        #if os(iOS)
+        // iPad: the references manager opens as its own window for
+        // Split View / Slide Over multitasking.
+        ReferencesWindowScene()
+        #endif
     }
 }
 
