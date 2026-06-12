@@ -8,6 +8,13 @@ import UIKit
 /// using the document's configured styles.
 struct PDFExporter {
     let configuration: StyleConfiguration
+    /// Image assets keyed by filename, used to draw image attachments.
+    let assets: [String: Data]
+
+    init(configuration: StyleConfiguration, assets: [String: Data] = [:]) {
+        self.configuration = configuration
+        self.assets = assets
+    }
 
     /// US Letter for Letter-paper regions, A4 elsewhere.
     private var pageSize: CGSize {
@@ -35,6 +42,11 @@ struct PDFExporter {
             width: pageSize.width - pageMargin * 2,
             height: pageSize.height - pageMargin * 2
         )
+
+        // Replace image attachment runs with export-rendered attachments: the
+        // decoded image scaled to the text width, centered, with the caption
+        // (and "Figure N — " prefix for numbered figures) drawn beneath.
+        materializeImages(in: content, textWidth: textRect.width, bodySize: DocxExporter.exportBodyPointSize)
 
         // TextKit 1 pagination: one text container per page.
         let storage = NSTextStorage(attributedString: content)
@@ -103,6 +115,164 @@ struct PDFExporter {
                 at: paragraph.location
             )
         }
+    }
+
+    // MARK: - Image attachments
+
+    /// Replace each `.writeImage` run's attachment with an export-rendered
+    /// `NSTextAttachment` whose image is the decoded asset scaled to the text
+    /// width plus the caption (with figure numbering) drawn beneath. Numbered
+    /// figures count in document order — numbering is export-only.
+    private func materializeImages(
+        in content: NSMutableAttributedString, textWidth: CGFloat, bodySize: CGFloat
+    ) {
+        let full = NSRange(location: 0, length: content.length)
+        var runs: [(range: NSRange, ref: ImageRef)] = []
+        content.enumerateAttribute(.writeImage, in: full, options: []) { value, range, _ in
+            guard let json = value as? String, let ref = json.decodedImageRef() else { return }
+            runs.append((range, ref))
+        }
+        guard !runs.isEmpty else { return }
+
+        // Figure numbers in document order (front-to-back).
+        var figureNumber = 0
+        var captions: [String] = []
+        for run in runs {
+            if run.ref.isFigure {
+                figureNumber += 1
+                let trimmed = run.ref.caption.isEmpty
+                    ? "Figure \(figureNumber)"
+                    : "Figure \(figureNumber) — \(run.ref.caption)"
+                captions.append(trimmed)
+            } else {
+                captions.append(run.ref.caption)
+            }
+        }
+
+        // Replace back-to-front so earlier ranges stay valid.
+        for (index, run) in runs.enumerated().reversed() {
+            guard let data = assets[run.ref.filename],
+                  let rendered = renderImageAttachment(
+                    data: data, caption: captions[index],
+                    textWidth: textWidth, bodySize: bodySize
+                  ) else { continue }
+            var attrs = content.attributes(at: run.range.location, effectiveRange: nil)
+            attrs[.attachment] = rendered
+            // Center the image paragraph.
+            let paragraph = NSMutableParagraphStyle()
+            if let existing = attrs[.paragraphStyle] as? NSParagraphStyle {
+                paragraph.setParagraphStyle(existing)
+            }
+            paragraph.alignment = .center
+            attrs[.paragraphStyle] = paragraph
+            content.replaceCharacters(
+                in: run.range,
+                with: NSAttributedString(string: "\u{FFFC}", attributes: attrs)
+            )
+        }
+    }
+
+    /// Build a plain `NSTextAttachment` whose `image` is the decoded asset
+    /// scaled to `textWidth` (never upscaled) with the caption drawn beneath,
+    /// and whose bounds match the rendered size so TextKit 1 lays it out.
+    private func renderImageAttachment(
+        data: Data, caption: String, textWidth: CGFloat, bodySize: CGFloat
+    ) -> NSTextAttachment? {
+        guard let source = NativeImage(data: data) else { return nil }
+        let pixelSize = imagePixelSize(source)
+        guard pixelSize.width > 0, pixelSize.height > 0 else { return nil }
+
+        let scale = min(1, textWidth / pixelSize.width)
+        let drawSize = CGSize(width: pixelSize.width * scale, height: pixelSize.height * scale)
+
+        let captionFont = fontForExport(size: bodySize * 0.85)
+        let captionGap: CGFloat = 6
+        var captionHeight: CGFloat = 0
+        let captionParagraph = NSMutableParagraphStyle()
+        captionParagraph.alignment = .center
+        if !caption.isEmpty {
+            let bounding = (caption as NSString).boundingRect(
+                with: CGSize(width: drawSize.width, height: .greatestFiniteMagnitude),
+                options: [.usesLineFragmentOrigin, .usesFontLeading],
+                attributes: [.font: captionFont, .paragraphStyle: captionParagraph],
+                context: nil
+            )
+            captionHeight = ceil(bounding.height) + captionGap
+        }
+
+        let totalSize = CGSize(
+            width: max(drawSize.width, 1),
+            height: max(drawSize.height + captionHeight, 1)
+        )
+
+        let captionColor: NativeColor
+        #if os(macOS)
+        captionColor = NativeColor.darkGray
+        #else
+        captionColor = NativeColor.darkGray
+        #endif
+        let captionAttrs: [NSAttributedString.Key: Any] = [
+            .font: captionFont,
+            .foregroundColor: captionColor,
+            .paragraphStyle: captionParagraph,
+        ]
+
+        #if os(macOS)
+        let composite = NSImage(size: totalSize)
+        composite.lockFocus()
+        source.draw(
+            in: NSRect(x: 0, y: captionHeight, width: drawSize.width, height: drawSize.height),
+            from: .zero, operation: .sourceOver, fraction: 1
+        )
+        if captionHeight > 0 {
+            (caption as NSString).draw(
+                with: NSRect(x: 0, y: 0, width: totalSize.width, height: captionHeight - captionGap),
+                options: [.usesLineFragmentOrigin, .usesFontLeading],
+                attributes: captionAttrs, context: nil
+            )
+        }
+        composite.unlockFocus()
+        #else
+        let renderer = UIGraphicsImageRenderer(size: totalSize)
+        let composite = renderer.image { _ in
+            source.draw(in: CGRect(x: 0, y: 0, width: drawSize.width, height: drawSize.height))
+            if captionHeight > 0 {
+                (caption as NSString).draw(
+                    with: CGRect(
+                        x: 0, y: drawSize.height + captionGap,
+                        width: totalSize.width, height: captionHeight - captionGap
+                    ),
+                    options: [.usesLineFragmentOrigin, .usesFontLeading],
+                    attributes: captionAttrs, context: nil
+                )
+            }
+        }
+        #endif
+
+        let attachment = NSTextAttachment()
+        attachment.image = composite
+        attachment.bounds = CGRect(origin: .zero, size: totalSize)
+        return attachment
+    }
+
+    private func imagePixelSize(_ image: NativeImage) -> CGSize {
+        #if os(macOS)
+        if let rep = image.representations.max(by: { $0.pixelsWide < $1.pixelsWide }),
+           rep.pixelsWide > 0, rep.pixelsHigh > 0 {
+            return CGSize(width: rep.pixelsWide, height: rep.pixelsHigh)
+        }
+        return image.size
+        #else
+        return CGSize(width: image.size.width * image.scale, height: image.size.height * image.scale)
+        #endif
+    }
+
+    private func fontForExport(size: CGFloat) -> NativeFont {
+        #if os(macOS)
+        return NSFont.systemFont(ofSize: size)
+        #else
+        return UIFont.systemFont(ofSize: size)
+        #endif
     }
 
     // MARK: - Platform rendering

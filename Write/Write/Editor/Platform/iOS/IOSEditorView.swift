@@ -1,6 +1,7 @@
 #if os(iOS)
 import UIKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 final class WriteUITextView: UITextView {
     var viewModel: EditorViewModel?
@@ -34,11 +35,43 @@ final class WriteUITextView: UITextView {
     }
 
     override func paste(_ sender: Any?) {
-        guard let plainText = UIPasteboard.general.string else {
+        // An image-only clipboard (no text) pastes as an inserted image; the
+        // original bytes are preserved. Otherwise fall back to plain text.
+        let pasteboard = UIPasteboard.general
+        if !pasteboard.hasStrings, let (data, ext) = Self.imagePayload(from: pasteboard) {
+            viewModel?.insertImage(data: data, fileExtension: ext)
+            return
+        }
+        guard let plainText = pasteboard.string else {
             super.paste(sender)
             return
         }
         insertText(plainText)
+    }
+
+    /// Image bytes + extension from a pasteboard, preferring typed
+    /// representations (so the original format/bytes survive) before falling
+    /// back to the generic `image` accessor.
+    static func imagePayload(from pasteboard: UIPasteboard) -> (Data, String)? {
+        guard pasteboard.hasImages else { return nil }
+        // Prefer concrete UTType data so the original bytes/extension survive.
+        let typeExt: [(String, String)] = [
+            (UTType.png.identifier, "png"),
+            (UTType.jpeg.identifier, "jpeg"),
+            (UTType.heic.identifier, "heic"),
+            (UTType.gif.identifier, "gif"),
+            (UTType.tiff.identifier, "tiff"),
+        ]
+        for (type, ext) in typeExt {
+            if let data = pasteboard.data(forPasteboardType: type) {
+                return (data, ext)
+            }
+        }
+        // Fallback: re-encode the generic image as PNG (lossless).
+        if let image = pasteboard.image, let data = image.pngData() {
+            return (data, "png")
+        }
+        return nil
     }
 
     override func toggleBoldface(_ sender: Any?) {
@@ -74,13 +107,18 @@ struct IOSEditorView: UIViewRepresentable {
         textView.allowsEditingTextAttributes = false
         textView.delegate = context.coordinator
 
-        textView.inputAccessoryView = FormattingAccessoryBar.make(viewModel: viewModel)
+        // iPhone only: iPad already shows the system shortcut bar above the
+        // keyboard (whose B/I/U route to our toggles) plus the floating
+        // formatting bar — stacking ours under those doubles the controls.
+        if textView.traitCollection.userInterfaceIdiom == .phone {
+            textView.inputAccessoryView = FormattingAccessoryBar.make(viewModel: viewModel)
+        }
 
         let handle = IOSParagraphHandleController(viewModel: viewModel, textView: textView)
         context.coordinator.handleController = handle
 
-        // A tap that lands on a chip opens its popover; it fails otherwise so
-        // normal caret placement and editing are untouched.
+        // A tap that lands on a chip or an image opens its popover; it fails
+        // otherwise so normal caret placement and editing are untouched.
         let chipTap = UITapGestureRecognizer(
             target: context.coordinator, action: #selector(Coordinator.handleChipTap(_:))
         )
@@ -134,7 +172,7 @@ struct IOSEditorView: UIViewRepresentable {
             }
         }
 
-        // MARK: Chip tap
+        // MARK: Chip / image tap
 
         /// The chip range under a point in the text view, or nil.
         private func chipRange(at point: CGPoint, in textView: UITextView) -> NSRange? {
@@ -152,22 +190,51 @@ struct IOSEditorView: UIViewRepresentable {
             return nil
         }
 
+        /// The image attachment range under a point in the text view, or nil.
+        private func imageRange(at point: CGPoint, in textView: UITextView) -> NSRange? {
+            guard let textStorage = viewModel.textContentStorage.textStorage,
+                  textStorage.length > 0 else { return nil }
+            guard let position = textView.closestPosition(to: point) else { return nil }
+            let index = textView.offset(from: textView.beginningOfDocument, to: position)
+            for candidate in [index, index - 1] where candidate >= 0 && candidate < textStorage.length {
+                guard textStorage.attribute(.writeImage, at: candidate, effectiveRange: nil) is String
+                else { continue }
+                var effective = NSRange(location: 0, length: 0)
+                textStorage.attribute(
+                    .writeImage, at: candidate, longestEffectiveRange: &effective,
+                    in: NSRange(location: 0, length: textStorage.length)
+                )
+                if let rect = viewModel.viewRect(forCharacterRange: effective), rect.contains(point) {
+                    return effective
+                }
+            }
+            return nil
+        }
+
         @objc func handleChipTap(_ gesture: UITapGestureRecognizer) {
             guard gesture.state == .ended, let textView else { return }
             let point = gesture.location(in: textView)
-            guard let chip = chipRange(at: point, in: textView) else { return }
-            viewModel.pendingPopoverChipRange = chip
+            // Images take precedence over chips (mirrors macOS mouseDown), though
+            // the two never overlap on the same character.
+            if let image = imageRange(at: point, in: textView) {
+                viewModel.pendingImagePopoverRange = image
+                return
+            }
+            if let chip = chipRange(at: point, in: textView) {
+                viewModel.pendingPopoverChipRange = chip
+            }
         }
 
         func gestureRecognizer(
             _ gestureRecognizer: UIGestureRecognizer,
             shouldReceive touch: UITouch
         ) -> Bool {
-            // Only accept the touch if it lands on a chip — otherwise let the
-            // text view handle it normally (this recognizer simply fails).
+            // Only accept the touch if it lands on a chip or an image — otherwise
+            // let the text view handle it normally (this recognizer simply fails).
             guard gestureRecognizer === chipTap, let textView else { return true }
             let point = touch.location(in: textView)
-            return chipRange(at: point, in: textView) != nil
+            return imageRange(at: point, in: textView) != nil
+                || chipRange(at: point, in: textView) != nil
         }
 
         func gestureRecognizer(

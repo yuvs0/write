@@ -12,6 +12,14 @@ final class WriteTextView: NSTextView {
     var chipRangeAtPoint: ((NSPoint) -> NSRange?)?
     /// Invoked with a chip range to open its locator popover.
     var onChipClicked: ((NSRange) -> Void)?
+    /// Asked whether a click landed on an image attachment; if it returns a
+    /// range, the view opens that image's popover and suppresses caret placement.
+    var imageRangeAtPoint: ((NSPoint) -> NSRange?)?
+    /// Invoked with an image range to open its caption popover.
+    var onImageClicked: ((NSRange) -> Void)?
+    /// Insert image bytes (from a paste or a drop) at a character index (nil =
+    /// at the caret). Returns false when the data couldn't be used.
+    var onInsertImage: ((Data, String, Int?) -> Void)?
 
     /// Width of the text column; side margins grow beyond the base padding
     /// only to center the column. The hover handle floats inside the margin.
@@ -19,8 +27,41 @@ final class WriteTextView: NSTextView {
     static let basePadding: CGFloat = 28
 
     override func paste(_ sender: Any?) {
+        // If the clipboard carries image data and no plain text, paste it as an
+        // image. Otherwise fall back to the plain-text paste path.
+        let pasteboard = NSPasteboard.general
+        let hasText = pasteboard.string(forType: .string)?.isEmpty == false
+        if !hasText, let (data, ext) = Self.imagePayload(from: pasteboard) {
+            onInsertImage?(data, ext, nil)
+            return
+        }
         pasteAsPlainText(sender)
         onPaste?()
+    }
+
+    /// Image bytes + extension from a pasteboard, preferring file URLs (so the
+    /// original format/bytes survive) then raw image data types.
+    static func imagePayload(from pasteboard: NSPasteboard) -> (Data, String)? {
+        // File URLs (e.g. copied from Finder).
+        if let urls = pasteboard.readObjects(
+            forClasses: [NSURL.self],
+            options: [.urlReadingContentsConformToTypes: ["public.image"]]
+        ) as? [URL], let url = urls.first, let data = try? Data(contentsOf: url) {
+            return (data, url.pathExtension)
+        }
+        // Raw image data types.
+        let typeExt: [(NSPasteboard.PasteboardType, String)] = [
+            (.png, "png"),
+            (.tiff, "tiff"),
+            (NSPasteboard.PasteboardType("public.jpeg"), "jpeg"),
+            (NSPasteboard.PasteboardType("com.compuserve.gif"), "gif"),
+        ]
+        for (type, ext) in typeExt {
+            if let data = pasteboard.data(forType: type) {
+                return (data, ext)
+            }
+        }
+        return nil
     }
 
     override func keyDown(with event: NSEvent) {
@@ -37,12 +78,15 @@ final class WriteTextView: NSTextView {
     /// can apply to several stretches of text at once. (TextKit 2 text
     /// views no longer do this themselves.)
     override func mouseDown(with event: NSEvent) {
-        // A plain click on a chip opens its popover instead of placing a caret.
+        // A plain click on a chip or image opens its popover, not a caret.
         if !event.modifierFlags.contains(.command),
-           !event.modifierFlags.contains(.shift),
-           let chipRangeAtPoint {
+           !event.modifierFlags.contains(.shift) {
             let point = convert(event.locationInWindow, from: nil)
-            if let chipRange = chipRangeAtPoint(point) {
+            if let imageRange = imageRangeAtPoint?(point) {
+                onImageClicked?(imageRange)
+                return
+            }
+            if let chipRange = chipRangeAtPoint?(point) {
                 onChipClicked?(chipRange)
                 return
             }
@@ -103,6 +147,36 @@ final class WriteTextView: NSTextView {
         super.mouseExited(with: event)
         onMouseMoved?(nil)
     }
+
+    // MARK: - Drag & drop (image files / image data)
+
+    /// Register for image-bearing drags. Called from the representable's setup.
+    func registerForImageDrags() {
+        registerForDraggedTypes([
+            .fileURL, .png, .tiff,
+            NSPasteboard.PasteboardType("public.jpeg"),
+            NSPasteboard.PasteboardType("com.compuserve.gif"),
+        ])
+    }
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        Self.imagePayload(from: sender.draggingPasteboard) != nil ? .copy : super.draggingEntered(sender)
+    }
+
+    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+        Self.imagePayload(from: sender.draggingPasteboard) != nil ? .copy : super.draggingUpdated(sender)
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        guard let (data, ext) = Self.imagePayload(from: sender.draggingPasteboard) else {
+            return super.performDragOperation(sender)
+        }
+        // Drop at the character index nearest the drop point.
+        let point = convert(sender.draggingLocation, from: nil)
+        let index = characterIndexForInsertion(at: point)
+        onInsertImage?(data, ext, index)
+        return true
+    }
 }
 
 struct MacEditorView: NSViewRepresentable {
@@ -158,6 +232,21 @@ struct MacEditorView: NSViewRepresentable {
             viewModel?.pendingPopoverChipRange = chipRange
         }
 
+        textView.imageRangeAtPoint = { [weak viewModel, weak textView] point in
+            guard let viewModel, let textView else { return nil }
+            return Self.imageRange(at: point, in: textView, viewModel: viewModel)
+        }
+
+        textView.onImageClicked = { [weak viewModel] imageRange in
+            viewModel?.pendingImagePopoverRange = imageRange
+        }
+
+        textView.onInsertImage = { [weak viewModel] data, ext, index in
+            viewModel?.insertImage(data: data, fileExtension: ext, at: index)
+        }
+
+        textView.registerForImageDrags()
+
         let handle = ParagraphHandleController(viewModel: viewModel, textView: textView)
         textView.onMouseMoved = { [weak handle] point in
             handle?.mouseMoved(to: point)
@@ -194,6 +283,27 @@ struct MacEditorView: NSViewRepresentable {
             // Confirm the point is within the chip's laid-out rect.
             if let rect = viewModel.viewRect(forCharacterRange: chip), rect.contains(point) {
                 return chip
+            }
+        }
+        return nil
+    }
+
+    /// Map a point to an image attachment run under it, if any.
+    private static func imageRange(
+        at point: NSPoint, in textView: NSTextView, viewModel: EditorViewModel
+    ) -> NSRange? {
+        guard let textStorage = viewModel.textContentStorage.textStorage,
+              textStorage.length > 0 else { return nil }
+        let index = textView.characterIndexForInsertion(at: point)
+        let candidates = [index, index - 1].filter { $0 >= 0 && $0 < textStorage.length }
+        for candidate in candidates {
+            guard textStorage.attribute(.writeImage, at: candidate, effectiveRange: nil) is String
+            else { continue }
+            var effective = NSRange(location: 0, length: 0)
+            textStorage.attribute(.writeImage, at: candidate, longestEffectiveRange: &effective,
+                                  in: NSRange(location: 0, length: textStorage.length))
+            if let rect = viewModel.viewRect(forCharacterRange: effective), rect.contains(point) {
+                return effective
             }
         }
         return nil

@@ -102,9 +102,69 @@ extension NSAttributedString.Key {
     static let writeLink = NSAttributedString.Key("write.link")
     /// JSON-encoded `[CitationRef]` for a citation chip run.
     static let writeCitation = NSAttributedString.Key("write.citation")
+    /// JSON-encoded `ImageRef` for an image attachment character. Stored
+    /// alongside the `NSTextAttachment` so parse/serialize stay pure even when
+    /// the asset bytes (and thus the rendered attachment) aren't available.
+    static let writeImage = NSAttributedString.Key("write.image")
     /// NSNumber(true) present on every character of paragraphs inside the
     /// generated bibliography region (including the heading paragraph).
     static let writeBibliography = NSAttributedString.Key("write.bibliography")
+}
+
+// MARK: - ImageRef
+
+/// The semantic payload of an image attachment: which asset it shows, its
+/// caption (also the alt text — single source of truth), and whether it is a
+/// numbered figure. Stored as JSON under `.writeImage` so the parser and
+/// serializer never need the asset bytes; the editor materializes the rendered
+/// `WriteImageAttachment` separately from the document's asset store.
+nonisolated struct ImageRef: Hashable, Codable {
+    /// Asset filename inside the package's `assets/` folder, e.g. `a1b2c3d4.png`.
+    var filename: String
+    /// Caption shown beneath the image and used as the markdown alt text.
+    var caption: String
+    /// When true the image is a numbered figure (numbering is computed at
+    /// export time, never stored).
+    var isFigure: Bool
+
+    init(filename: String, caption: String = "", isFigure: Bool = false) {
+        self.filename = filename
+        self.caption = caption
+        self.isFigure = isFigure
+    }
+
+    /// Encode to a compact, stable JSON string for storage in an attribute value.
+    func encodedJSON() -> String {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        guard let data = try? encoder.encode(self),
+              let string = String(data: data, encoding: .utf8) else {
+            return "{}"
+        }
+        return string
+    }
+}
+
+extension String {
+    /// Decode a JSON string back to an `ImageRef`.
+    func decodedImageRef() -> ImageRef? {
+        guard let data = self.data(using: .utf8),
+              let ref = try? JSONDecoder().decode(ImageRef.self, from: data) else {
+            return nil
+        }
+        return ref
+    }
+}
+
+extension NSAttributedString {
+    /// Return the `ImageRef` stored at `location`, or nil if that position
+    /// carries no image attribute.
+    func imageRef(at location: Int) -> ImageRef? {
+        guard location >= 0, location < length,
+              let json = attribute(.writeImage, at: location, effectiveRange: nil) as? String
+        else { return nil }
+        return json.decodedImageRef()
+    }
 }
 
 // MARK: - CitationRef JSON helpers

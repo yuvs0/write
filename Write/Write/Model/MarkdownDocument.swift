@@ -12,10 +12,14 @@ struct MarkdownDocument: FileDocument {
     var savedText: String
     var referencesJSON: Data?
     var settingsJSON: Data?
+    /// Image assets keyed by filename (e.g. `a1b2c3d4.png`), stored byte-for-byte
+    /// in the package's `assets/` folder. Originals are never recompressed.
+    var assets: [String: Data]
 
     init(rawText: String = "") {
         self.rawText = rawText
         self.savedText = rawText
+        self.assets = [:]
     }
 
     init(configuration: ReadConfiguration) throws {
@@ -42,6 +46,19 @@ struct MarkdownDocument: FileDocument {
 
         self.referencesJSON = wrappers["references.json"]?.regularFileContents
         self.settingsJSON   = wrappers["settings.json"]?.regularFileContents
+
+        // Load every regular file inside the `assets/` directory wrapper,
+        // keyed by filename, preserving the bytes verbatim.
+        var assets: [String: Data] = [:]
+        if let assetsWrapper = wrappers["assets"], assetsWrapper.isDirectory,
+           let children = assetsWrapper.fileWrappers {
+            for (name, child) in children {
+                if let data = child.regularFileContents {
+                    assets[name] = data
+                }
+            }
+        }
+        self.assets = assets
     }
 
     func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper {
@@ -50,7 +67,8 @@ struct MarkdownDocument: FileDocument {
             existing: configuration.existingFile,
             contentMD: contentData,
             referencesJSON: referencesJSON,
-            settingsJSON: settingsJSON
+            settingsJSON: settingsJSON,
+            assets: assets
         )
     }
 
@@ -61,12 +79,16 @@ struct MarkdownDocument: FileDocument {
     /// - Always replace `content.md` with `contentMD`.
     /// - Replace `references.json` / `settings.json` when the corresponding
     ///   `Data?` parameter is non-nil; leave untouched when nil.
-    /// - All other child wrappers (e.g. `assets/`, `custom.txt`) pass through.
+    /// - Rewrite the `assets/` folder from `assets` (the dict was loaded from
+    ///   that folder, so replacing it wholesale is lossless; an empty dict
+    ///   removes the folder).
+    /// - All other child wrappers (e.g. `custom.txt`) pass through.
     nonisolated static func mergedFileWrapper(
         existing: FileWrapper?,
         contentMD: Data,
         referencesJSON: Data?,
-        settingsJSON: Data?
+        settingsJSON: Data?,
+        assets: [String: Data] = [:]
     ) -> FileWrapper {
         let directory: FileWrapper
 
@@ -92,6 +114,23 @@ struct MarkdownDocument: FileDocument {
 
         if let data = settingsJSON {
             replace(named: "settings.json", with: data)
+        }
+
+        // Rewrite the assets folder from the dict. Remove the old folder first
+        // so deletions propagate; only re-add when there are assets to store.
+        if let oldAssets = directory.fileWrappers?["assets"] {
+            directory.removeFileWrapper(oldAssets)
+        }
+        if !assets.isEmpty {
+            var children: [String: FileWrapper] = [:]
+            for (name, data) in assets {
+                let child = FileWrapper(regularFileWithContents: data)
+                child.preferredFilename = name
+                children[name] = child
+            }
+            let assetsWrapper = FileWrapper(directoryWithFileWrappers: children)
+            assetsWrapper.preferredFilename = "assets"
+            directory.addFileWrapper(assetsWrapper)
         }
 
         return directory

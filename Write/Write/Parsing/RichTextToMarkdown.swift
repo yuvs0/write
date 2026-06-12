@@ -149,6 +149,7 @@ struct RichTextToMarkdown {
         var traits: InlineTraits
         var link: String?
         var citationRefs: [CitationRef]?
+        var imageRef: ImageRef?
     }
 
     private func inlineMarkdown(in range: NSRange, of attributed: NSAttributedString) -> String {
@@ -161,16 +162,22 @@ struct RichTextToMarkdown {
             let link = attrs[.writeLink] as? String
             let citJSON = attrs[.writeCitation] as? String
             let citRefs = citJSON.flatMap { $0.decodedCitationRefs() }
+            let imgRef = (attrs[.writeImage] as? String).flatMap { $0.decodedImageRef() }
 
-            // Citation chip runs are never merged with adjacent runs.
-            if citRefs != nil {
-                runs.append(Run(text: text, traits: traits, link: link, citationRefs: citRefs))
+            // Image and citation runs are atomic; never merged with neighbors.
+            if imgRef != nil {
+                runs.append(Run(text: text, traits: traits, link: link,
+                                citationRefs: nil, imageRef: imgRef))
+            } else if citRefs != nil {
+                runs.append(Run(text: text, traits: traits, link: link,
+                                citationRefs: citRefs, imageRef: nil))
             } else if var last = runs.last, last.traits == traits, last.link == link,
-                      last.citationRefs == nil {
+                      last.citationRefs == nil, last.imageRef == nil {
                 last.text += text
                 runs[runs.count - 1] = last
             } else {
-                runs.append(Run(text: text, traits: traits, link: link, citationRefs: nil))
+                runs.append(Run(text: text, traits: traits, link: link,
+                                citationRefs: nil, imageRef: nil))
             }
         }
 
@@ -182,6 +189,11 @@ struct RichTextToMarkdown {
     }
 
     private func render(_ run: Run) -> String {
+        // Image attachment runs serialize to standard markdown image syntax.
+        if let imageRef = run.imageRef {
+            return imageMarkdown(imageRef)
+        }
+
         // Citation chip runs are serialized as Pandoc citation syntax.
         if let refs = run.citationRefs {
             return pandocCitation(refs)
@@ -214,6 +226,37 @@ struct RichTextToMarkdown {
         }
 
         return leading + rendered + trailing
+    }
+
+    /// Emit a markdown image for an attachment run:
+    /// `![caption](assets/<file>)`, plus a `"figure"` title for numbered
+    /// figures. The caption is the alt text (single source of truth).
+    private func imageMarkdown(_ ref: ImageRef) -> String {
+        let alt = escapeAltText(ref.caption)
+        let path = "assets/\(ref.filename)"
+        if ref.isFigure {
+            return "![\(alt)](\(path) \"figure\")"
+        }
+        return "![\(alt)](\(path))"
+    }
+
+    /// Escape an image caption used as markdown alt text. `]` would close the
+    /// alt span early; the rest of the inline set is escaped so the caption
+    /// round-trips as literal text (mirrors `escapeInline`).
+    private func escapeAltText(_ text: String) -> String {
+        var result = ""
+        result.reserveCapacity(text.count + 8)
+        for character in text {
+            if character == "\u{2028}" {
+                // Hard line breaks can't live inside alt text; flatten to a space.
+                result += " "
+            } else if character == "]" || Self.alwaysEscaped.contains(character) {
+                result += "\\\(character)"
+            } else {
+                result.append(character)
+            }
+        }
+        return result
     }
 
     /// Emit a Pandoc citation string for one or more refs.

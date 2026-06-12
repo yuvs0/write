@@ -71,11 +71,20 @@ final class CitationController {
         in storage: NSAttributedString
     ) -> [(range: NSRange, refs: [CitationRef], json: String)] {
         var result: [(NSRange, [CitationRef], String)] = []
+        let text = storage.string as NSString
         let full = NSRange(location: 0, length: storage.length)
         storage.enumerateAttribute(.writeCitation, in: full, options: []) { value, range, _ in
             guard let json = value as? String,
                   let refs = json.decodedCitationRefs() else { return }
-            result.append((range, refs, json))
+            // Defensive: never let a chip run swallow paragraph breaks —
+            // replacing a newline-bearing run would merge paragraphs.
+            var trimmed = range
+            while trimmed.length > 0,
+                  text.character(at: NSMaxRange(trimmed) - 1) == 0x0A {
+                trimmed.length -= 1
+            }
+            guard trimmed.length > 0 else { return }
+            result.append((trimmed, refs, json))
         }
         return result
     }
@@ -376,6 +385,7 @@ final class CitationController {
     /// coordinates) and the resolver input it maps to.
     struct DetectedToken {
         var range: NSRange
+        var text: String
         var input: MetadataResolver.Input
     }
 
@@ -405,7 +415,7 @@ final class CitationController {
         // Build candidates with detected inputs.
         let candidates: [DetectedToken] = tokens.compactMap { token in
             guard let input = MetadataResolver.detect(token.text) else { return nil }
-            return DetectedToken(range: token.range, input: input)
+            return DetectedToken(range: token.range, text: token.text, input: input)
         }
         guard !candidates.isEmpty else { return nil }
 

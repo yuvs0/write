@@ -8,6 +8,7 @@ struct WriteApp: App {
         }
         .commands {
             FormatCommands()
+            InsertCommands()
             ExportCommands()
             ViewCommands()
             ZoomCommands()
@@ -77,12 +78,36 @@ struct FormatCommands: Commands {
             Button("Cite Link at Cursor") {
                 viewModel?.citeTokenAtCaret()
             }
+
+            #if os(iOS)
+            // On iPad the split view's navigation bar is hidden, so the
+            // style settings sheet is reached from the menu bar (macOS has
+            // the Settings window, iPhone a navigation-bar button).
+            Divider()
+            Button("Text Styles…") {
+                viewModel?.requestsStyleSettings = true
+            }
+            #endif
         }
     }
 
     private func blockStyleButton(_ style: BlockStyle, shortcut: Character) -> some View {
         Button(style.displayName) { viewModel?.setBlockStyle(style) }
             .keyboardShortcut(KeyEquivalent(shortcut), modifiers: [.command, .option])
+    }
+}
+
+/// Insert menu (macOS + iPad menu bar): image insertion via the file open
+/// panel. iPhone uses the accessory-bar photo button instead.
+struct InsertCommands: Commands {
+    @FocusedValue(\.editorViewModel) var viewModel
+
+    var body: some Commands {
+        CommandMenu("Insert") {
+            Button("Image…") { viewModel?.pendingImageImport = true }
+                .keyboardShortcut("i", modifiers: [.command, .option])
+                .disabled(viewModel == nil)
+        }
     }
 }
 

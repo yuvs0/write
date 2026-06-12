@@ -36,15 +36,30 @@ nonisolated struct MetadataResolver {
         while let last = s.last, ".,;:)]}'\"".contains(last) { s = String(s.dropLast()) }
         guard !s.isEmpty else { return nil }
 
-        if let doi = extractDOIFromURL(s) { return .doi(doi) }
-        if let id  = extractArXivFromURL(s) { return .arxiv(id) }
-        if matchesDOI(s)     { return .doi(s) }
+        // An arXiv link is the more specific form of its URL, and a DOI
+        // embedded ANYWHERE (doi.org links, publisher URLs like
+        // science.org/doi/10.1126/…, "doi:10.x/y" prefixes, surrounding
+        // prose) beats scraping the page.
+        if let id = extractArXivFromURL(s) { return .arxiv(id) }
+        if let doi = extractEmbeddedDOI(s) { return .doi(doi) }
         if matchesArXivID(s) { return .arxiv(s) }
         if let isbn = normalizedISBN(s) { return .isbn(isbn) }
         if let url = URL(string: s), url.scheme == "http" || url.scheme == "https" {
             return .url(url)
         }
         return nil
+    }
+
+    /// A specific, actionable message for input `detect` rejected.
+    static func detectionHint(_ string: String) -> String {
+        let s = string.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let prefix = incompleteDOIPrefix(s) {
+            return "“\(prefix)” is only a DOI prefix — the full DOI continues "
+                + "after a slash (like \(prefix)/abc123). Paste the complete "
+                + "DOI or the article's URL."
+        }
+        return "Couldn't find a DOI, URL, ISBN, or arXiv ID. Paste the full "
+            + "link or identifier."
     }
 
     // MARK: - resolve
@@ -57,17 +72,67 @@ nonisolated struct MetadataResolver {
         case .url(let url):   return try await resolveURL(url)
         }
     }
+
+    /// Detect-and-resolve with fallbacks: a DOI extracted from a publisher
+    /// URL that fails to resolve (over-captured suffix, registry hiccup)
+    /// falls back to scraping the page itself.
+    func resolve(string: String) async throws -> CSLItem {
+        guard let input = Self.detect(string) else {
+            throw ResolverError.noUsableMetadata(Self.detectionHint(string))
+        }
+        do {
+            return try await resolve(input)
+        } catch {
+            let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
+            if case .doi = input,
+               let url = URL(string: trimmed),
+               url.scheme == "http" || url.scheme == "https",
+               let fromPage = try? await resolve(.url(url)) {
+                return fromPage
+            }
+            throw error
+        }
+    }
 }
 
 // MARK: - Detection helpers (file-private)
 
-private nonisolated func extractDOIFromURL(_ s: String) -> String? {
-    guard let r = s.range(of: #"^https?://(?:dx\.)?doi\.org/"#, options: [.regularExpression, .caseInsensitive]) else {
+/// Finds a full DOI anywhere in the string — bare, `doi:`-prefixed, on a
+/// doi.org link, or buried in a publisher URL path — and trims URL
+/// artifacts (queries, fragments, `/full`-style viewer suffixes) off it.
+private nonisolated func extractEmbeddedDOI(_ s: String) -> String? {
+    guard let range = s.range(of: #"10\.\d{4,9}/[^\s"<>]+"#, options: .regularExpression) else {
         return nil
     }
-    let doi = String(s[r.upperBound...])
-        .trimmingCharacters(in: .whitespacesAndNewlines)
+    var doi = String(s[range])
+
+    if let cut = doi.firstIndex(where: { $0 == "?" || $0 == "#" }) {
+        doi = String(doi[..<cut])
+    }
+    while let last = doi.last, ".,;:)]}'\"/".contains(last) {
+        doi.removeLast()
+    }
+    // Publisher viewer pages append path segments after the DOI itself.
+    let viewerSuffixes = ["/full", "/abstract", "/pdf", "/epdf", "/html", "/meta", "/summary"]
+    var stripped = true
+    while stripped {
+        stripped = false
+        for suffix in viewerSuffixes where doi.lowercased().hasSuffix(suffix) {
+            doi = String(doi.dropLast(suffix.count))
+            stripped = true
+        }
+    }
+
     return matchesDOI(doi) ? doi : nil
+}
+
+/// A `10.NNNN` registrant prefix with no article suffix — not resolvable,
+/// but worth a precise hint instead of a generic failure.
+private nonisolated func incompleteDOIPrefix(_ s: String) -> String? {
+    guard s.range(of: #"10\.\d{4,9}/[^\s"<>]+"#, options: .regularExpression) == nil,
+          let range = s.range(of: #"10\.\d{4,9}"#, options: .regularExpression)
+    else { return nil }
+    return String(s[range])
 }
 
 private nonisolated func extractArXivFromURL(_ s: String) -> String? {
@@ -114,7 +179,11 @@ private nonisolated func resolveDOI(_ doi: String) async throws -> CSLItem {
         throw MetadataResolver.ResolverError.networkError("DOI server returned non-200")
     }
     do {
-        return try JSONDecoder().decode(CSLItem.self, from: data)
+        var item = try JSONDecoder().decode(CSLItem.self, from: data)
+        // Registry payloads carry no citekey (the decoder substitutes a
+        // UUID); blank it so the store generates a readable "smith2020".
+        item.id = ""
+        return item
     } catch {
         throw MetadataResolver.ResolverError.decodingError("CSL-JSON decode failed: \(error)")
     }
@@ -634,4 +703,99 @@ private nonisolated func replaceEntityMatches(
     }
     result += s[lastEnd...]
     return result
+}
+
+// MARK: - Bibliographic search (Crossref)
+
+extension MetadataResolver {
+    /// Free-text bibliographic search via Crossref's public REST API — the
+    /// same class of open scholarly service citation generators resolve
+    /// against. Returns candidates for the user to pick from, so fuzzy
+    /// input (titles, partial identifiers) still gets somewhere.
+    func searchCandidates(_ query: String, limit: Int = 5) async throws -> [CSLItem] {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return [] }
+
+        var components = URLComponents(string: "https://api.crossref.org/works")!
+        components.queryItems = [
+            URLQueryItem(name: "query.bibliographic", value: trimmed),
+            URLQueryItem(name: "rows", value: String(limit)),
+        ]
+        guard let url = components.url else {
+            throw ResolverError.networkError("Invalid search URL")
+        }
+        var request = URLRequest(url: url, timeoutInterval: 15)
+        // Polite-pool etiquette per the Crossref API documentation.
+        request.setValue(
+            "Write/1.0 (mailto:yuvraj@imaginaryparts.com)",
+            forHTTPHeaderField: "User-Agent"
+        )
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            throw ResolverError.networkError("The search service returned an error")
+        }
+        return try Self.parseCrossrefWorks(data)
+    }
+
+    static func parseCrossrefWorks(_ data: Data) throws -> [CSLItem] {
+        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let message = root["message"] as? [String: Any],
+              let works = message["items"] as? [[String: Any]] else {
+            throw ResolverError.decodingError("Unexpected search response")
+        }
+        return works.compactMap(crossrefWorkToCSL)
+    }
+
+    /// Crossref's work schema is CSL-adjacent (titles are arrays, some type
+    /// names differ); normalize to proper CSL-JSON.
+    private static func crossrefWorkToCSL(_ work: [String: Any]) -> CSLItem? {
+        guard let title = (work["title"] as? [String])?.first, !title.isEmpty else { return nil }
+
+        var fields: [String: JSONValue] = ["title": .string(title)]
+
+        let typeMap = [
+            "journal-article": "article-journal",
+            "proceedings-article": "paper-conference",
+            "book-chapter": "chapter",
+            "posted-content": "article",
+            "monograph": "book",
+            "edited-book": "book",
+            "reference-book": "book",
+        ]
+        let rawType = work["type"] as? String ?? "article-journal"
+        fields["type"] = .string(typeMap[rawType] ?? rawType)
+
+        if let container = (work["container-title"] as? [String])?.first {
+            fields["container-title"] = .string(container)
+        }
+        if let authors = work["author"] as? [[String: Any]] {
+            fields["author"] = .array(authors.map { person in
+                var entry: [String: JSONValue] = [:]
+                if let family = person["family"] as? String { entry["family"] = .string(family) }
+                if let given = person["given"] as? String { entry["given"] = .string(given) }
+                if entry.isEmpty, let literal = person["name"] as? String {
+                    entry["literal"] = .string(literal)
+                }
+                return .object(entry)
+            })
+        }
+        for key in ["issued", "published", "published-print", "published-online"] {
+            if let issued = work[key], let value = JSONValue(any: issued) {
+                fields["issued"] = value
+                break
+            }
+        }
+        for (crossrefKey, cslKey) in [
+            ("DOI", "DOI"), ("URL", "URL"), ("page", "page"),
+            ("volume", "volume"), ("issue", "issue"), ("publisher", "publisher"),
+        ] {
+            if let value = work[crossrefKey] as? String {
+                fields[cslKey] = .string(value)
+            }
+        }
+
+        // Empty id: ReferenceStore assigns a citekey on add.
+        return CSLItem(id: "", fields: fields)
+    }
 }

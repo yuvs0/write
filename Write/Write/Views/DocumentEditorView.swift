@@ -1,5 +1,6 @@
 import SwiftUI
 import UniformTypeIdentifiers
+import PhotosUI
 #if os(iOS)
 import UIKit
 #endif
@@ -11,6 +12,8 @@ struct DocumentEditorView: View {
     @State private var viewModel: EditorViewModel
     @State private var showsSettings = false
     @State private var showsReferencesSheet = false
+    @State private var photoItem: PhotosPickerItem?
+    @State private var showsPhotoPicker = false
 
     init(document: Binding<MarkdownDocument>, fileURL: URL? = nil) {
         self._document = document
@@ -18,7 +21,8 @@ struct DocumentEditorView: View {
         self._viewModel = State(initialValue: EditorViewModel(
             markdown: document.wrappedValue.rawText,
             referencesData: document.wrappedValue.referencesJSON,
-            settingsData: document.wrappedValue.settingsJSON
+            settingsData: document.wrappedValue.settingsJSON,
+            assets: document.wrappedValue.assets
         ))
     }
 
@@ -43,8 +47,19 @@ struct DocumentEditorView: View {
                 viewModel.refreshCitations()
                 document.settingsJSON = try? viewModel.referenceStore.settingsData()
             }
+            // Image assets changed: write the updated set into the document
+            // package (mirrors the references write-back).
+            .onChange(of: viewModel.assetsRevision) {
+                document.assets = viewModel.assets
+            }
             .citationErrorAlert(viewModel: viewModel)
             #if os(iOS)
+            .onChange(of: viewModel.requestsStyleSettings) { _, requested in
+                if requested {
+                    showsSettings = true
+                    viewModel.requestsStyleSettings = false
+                }
+            }
             .sheet(isPresented: $showsSettings) {
                 NavigationStack {
                     StyleSettingsView()
@@ -66,6 +81,35 @@ struct DocumentEditorView: View {
             ) { _ in
                 viewModel.pendingExport = nil
             }
+            // Insert → Image… (macOS / iPad menu bar): import an image file.
+            .fileImporter(
+                isPresented: imageImportPresented,
+                allowedContentTypes: [.image],
+                allowsMultipleSelection: false
+            ) { result in
+                viewModel.pendingImageImport = false
+                if case .success(let urls) = result, let url = urls.first {
+                    importImageFile(url)
+                }
+            }
+            // iPhone photo picker (presented from the accessory bar button).
+            .photosPicker(
+                isPresented: $showsPhotoPicker,
+                selection: $photoItem,
+                matching: .images,
+                preferredItemEncoding: .current
+            )
+            .onChange(of: photoItem) { _, item in
+                guard let item else { return }
+                Task { await loadPickedPhoto(item) }
+            }
+            .onChange(of: viewModel.requestsPhotoPicker) { _, requested in
+                if requested {
+                    showsPhotoPicker = true
+                    viewModel.requestsPhotoPicker = false
+                }
+            }
+            .overlay(alignment: .topLeading) { imagePopoverAnchor }
             .focusedSceneValue(\.editorViewModel, viewModel)
     }
 
@@ -92,6 +136,13 @@ struct DocumentEditorView: View {
                         ReferenceManagerView(viewModel: viewModel)
                             .inspectorColumnWidth(min: 280, ideal: 320, max: 420)
                     }
+                    #if os(iOS)
+                    // DocumentGroup already provides the iPad navigation bar
+                    // (back, filename, rename). The split view's own bar
+                    // would stack a second one below it, eating a quarter of
+                    // the screen and surfacing leaked titles.
+                    .toolbar(.hidden, for: .navigationBar)
+                    #endif
             }
         } else {
             #if os(iOS)
@@ -127,7 +178,7 @@ struct DocumentEditorView: View {
             .overlay(alignment: .topLeading) { citationPopoverAnchor }
             #if os(macOS)
             .background {
-                VisualEffectBackground()
+                EditorBackground()
                     .ignoresSafeArea()
             }
             #endif
@@ -145,15 +196,34 @@ struct DocumentEditorView: View {
                 }
             }
             #if os(iOS)
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
+            // iPad floats a sidebar toggle (its split-view bar is hidden);
+            // text style settings live in the menu bar there. iPhone keeps
+            // navigation-bar buttons.
+            .overlay(alignment: .topLeading) {
+                if showsDesktopChrome {
                     Button {
-                        showsSettings = true
+                        withAnimation { viewModel.showsNavigator.toggle() }
                     } label: {
-                        Label("Style Settings", systemImage: "textformat.alt")
+                        Image(systemName: "sidebar.leading")
+                            .font(.system(size: 15, weight: .medium))
+                            .frame(width: 36, height: 36)
+                            .contentShape(.circle)
                     }
+                    .buttonStyle(.plain)
+                    .glassEffect(.regular.interactive(), in: .circle)
+                    .padding(.top, 12)
+                    .padding(.leading, 14)
                 }
+            }
+            .toolbar {
                 if !showsDesktopChrome {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button {
+                            showsSettings = true
+                        } label: {
+                            Label("Style Settings", systemImage: "textformat.alt")
+                        }
+                    }
                     ToolbarItem(placement: .topBarTrailing) {
                         Button {
                             showsReferencesSheet = true
@@ -175,7 +245,7 @@ struct DocumentEditorView: View {
             set: { if !$0 { viewModel.pendingPopoverChipRange = nil } }
         )
         if let chipRange = viewModel.pendingPopoverChipRange,
-           let rect = viewModel.viewRect(forCharacterRange: chipRange) {
+           let rect = viewModel.viewportRect(forCharacterRange: chipRange) {
             Color.clear
                 .frame(width: 1, height: 1)
                 .popover(
@@ -209,6 +279,58 @@ struct DocumentEditorView: View {
                 if !presented { viewModel.pendingExport = nil }
             }
         )
+    }
+
+    private var imageImportPresented: Binding<Bool> {
+        Binding(
+            get: { viewModel.pendingImageImport },
+            set: { presented in
+                if !presented { viewModel.pendingImageImport = false }
+            }
+        )
+    }
+
+    /// A zero-size anchor hosting the image caption popover, positioned at the
+    /// image attachment's rect. Driven by `pendingImagePopoverRange`.
+    @ViewBuilder
+    private var imagePopoverAnchor: some View {
+        let presented = Binding(
+            get: { viewModel.pendingImagePopoverRange != nil },
+            set: { if !$0 { viewModel.pendingImagePopoverRange = nil } }
+        )
+        if let range = viewModel.pendingImagePopoverRange,
+           let rect = viewModel.viewportRect(forCharacterRange: range) {
+            Color.clear
+                .frame(width: 1, height: 1)
+                .popover(
+                    isPresented: presented,
+                    attachmentAnchor: .rect(.rect(rect)),
+                    arrowEdge: .bottom
+                ) {
+                    ImagePopover(viewModel: viewModel, imageRange: range) {
+                        viewModel.pendingImagePopoverRange = nil
+                    }
+                    .presentationCompactAdaptation(.popover)
+                }
+        }
+    }
+
+    /// Read an image file (Insert → Image…) and insert it at the caret.
+    private func importImageFile(_ url: URL) {
+        let needsScope = url.startAccessingSecurityScopedResource()
+        defer { if needsScope { url.stopAccessingSecurityScopedResource() } }
+        guard let data = try? Data(contentsOf: url) else { return }
+        let ext = url.pathExtension
+        viewModel.insertImage(data: data, fileExtension: ext)
+    }
+
+    /// Load a picked photo's Data (preserving original format) and insert it.
+    private func loadPickedPhoto(_ item: PhotosPickerItem) async {
+        defer { photoItem = nil }
+        guard let data = try? await item.loadTransferable(type: Data.self) else { return }
+        // Infer the extension from the picker's supplied content types.
+        let ext = item.supportedContentTypes.first?.preferredFilenameExtension ?? "png"
+        viewModel.insertImage(data: data, fileExtension: ext)
     }
 
     private var exportedFile: ExportedFile? {

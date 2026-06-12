@@ -55,12 +55,30 @@ final class EditorViewModel {
     /// Serialized markdown, kept in sync with the text storage.
     private(set) var markdown: String
 
+    /// Image assets keyed by filename, stored byte-for-byte. Originals are never
+    /// recompressed. Written back into the document package by the view layer
+    /// when `assetsRevision` changes.
+    private(set) var assets: [String: Data]
+    /// Bumped whenever the asset set changes, so the view layer can persist.
+    private(set) var assetsRevision: Int = 0
+
+    /// Set by the Insert → Image menu; observed by the editor view to present a
+    /// file importer. iOS uses a separate photo-picker affordance.
+    var pendingImageImport = false
+    /// Set by the iPhone accessory-bar photo button; the view presents a
+    /// PhotosPicker in response and clears the flag.
+    var requestsPhotoPicker = false
+
     /// Formatting state at the insertion point, reflected by toolbars.
     private(set) var activeTraits: InlineTraits = []
     private(set) var activeBlockStyle: BlockStyle = .body
 
     /// Set by menu commands; observed by the editor view to present an exporter.
     var pendingExport: ExportFormat?
+
+    /// Set by the iPad menu bar's "Text Styles…" command; the editor view
+    /// presents the style settings sheet and clears it.
+    var requestsStyleSettings = false
 
     // MARK: - Citation UI state (observed by the editor view)
 
@@ -72,6 +90,10 @@ final class EditorViewModel {
     /// at this chip range (set right after a ⌘↩ conversion or a chip click).
     var pendingPopoverChipRange: NSRange?
 
+    /// When non-nil, the editor view should present the image caption popover
+    /// anchored at this image attachment's range (set on an image click/tap).
+    var pendingImagePopoverRange: NSRange?
+
     private let serializer = RichTextToMarkdown()
 
     var styler: RichTextStyler {
@@ -82,10 +104,12 @@ final class EditorViewModel {
         markdown: String = "",
         styleStore: StyleStore = .shared,
         referencesData: Data? = nil,
-        settingsData: Data? = nil
+        settingsData: Data? = nil,
+        assets: [String: Data] = [:]
     ) {
         self.markdown = markdown
         self.styleStore = styleStore
+        self.assets = assets
 
         let store = ReferenceStore(referencesData: referencesData, settingsData: settingsData)
         self.referenceStore = store
@@ -112,6 +136,10 @@ final class EditorViewModel {
         let content = MarkdownToRichText().attributedString(from: markdown)
         styler.applyStyles(to: content)
         textStorage.setAttributedString(content)
+
+        // Image attribute runs load without a rendered attachment (the parser is
+        // pure). Materialize the real WriteImageAttachment from the asset bytes.
+        materializeImages()
 
         // Chips load with placeholder display text "(key)"; re-render them
         // from the live engine. Only bother if the document actually has
@@ -655,6 +683,182 @@ final class EditorViewModel {
         #endif
     }
 
+    // MARK: - Image assets
+
+    /// Store image bytes verbatim under a fresh filename and return that name.
+    /// Filename = 8-char lowercase hex id + sanitized extension. Never
+    /// recompresses. Bumps `assetsRevision`.
+    func addAsset(data: Data, suggestedExtension: String) -> String {
+        let ext = Self.sanitizedExtension(suggestedExtension)
+        var name = Self.makeAssetID() + ext
+        // Avoid the astronomically unlikely id collision.
+        while assets[name] != nil {
+            name = Self.makeAssetID() + ext
+        }
+        assets[name] = data
+        assetsRevision += 1
+        return name
+    }
+
+    /// Filenames present in `assets` but not referenced by any image attachment
+    /// in the document. Exposed for a future pruning UI; serialize never prunes.
+    func unusedAssetFilenames() -> [String] {
+        guard let textStorage = textContentStorage.textStorage else {
+            return Array(assets.keys)
+        }
+        var referenced = Set<String>()
+        let full = NSRange(location: 0, length: textStorage.length)
+        textStorage.enumerateAttribute(.writeImage, in: full, options: []) { value, _, _ in
+            if let json = value as? String, let ref = json.decodedImageRef() {
+                referenced.insert(ref.filename)
+            }
+        }
+        return assets.keys.filter { !referenced.contains($0) }
+    }
+
+    /// Build the rendered `WriteImageAttachment` for every `.writeImage` run
+    /// from the current asset bytes (the parser leaves runs attachment-less).
+    /// Mirrors how chips re-render after load. Safe to call repeatedly.
+    func materializeImages() {
+        guard let textStorage = textContentStorage.textStorage else { return }
+        let bodySize = styleStore.configuration.paragraph.fontSize
+        let full = NSRange(location: 0, length: textStorage.length)
+
+        // Collect runs first; mutate attributes (not characters) in one pass.
+        var runs: [(range: NSRange, ref: ImageRef)] = []
+        textStorage.enumerateAttribute(.writeImage, in: full, options: []) { value, range, _ in
+            guard let json = value as? String, let ref = json.decodedImageRef() else { return }
+            runs.append((range, ref))
+        }
+        guard !runs.isEmpty else { return }
+
+        textStorage.beginEditing()
+        for run in runs {
+            guard let data = assets[run.ref.filename],
+                  let attachment = WriteImageAttachment(ref: run.ref, data: data) else {
+                continue
+            }
+            attachment.bodyPointSize = bodySize
+            textStorage.addAttribute(.attachment, value: attachment, range: run.range)
+        }
+        textStorage.endEditing()
+        invalidateLayout()
+    }
+
+    /// Sanitize a file extension to a lowercase `.ext` form (alphanumeric only).
+    private static func sanitizedExtension(_ raw: String) -> String {
+        let trimmed = raw.hasPrefix(".") ? String(raw.dropFirst()) : raw
+        let cleaned = trimmed.lowercased().filter { $0.isLetter || $0.isNumber }
+        return cleaned.isEmpty ? "" : "." + cleaned
+    }
+
+    private static func makeAssetID() -> String {
+        let hex = "0123456789abcdef"
+        return String((0..<8).map { _ in hex.randomElement()! })
+    }
+
+    // MARK: - Image insertion
+
+    /// Insert an image: store the bytes as an asset, then drop a freshly
+    /// materialized attachment into its own body paragraph at the caret (or at
+    /// `location` when provided, e.g. a drop point). Undo-aware.
+    func insertImage(data: Data, fileExtension: String, at location: Int? = nil) {
+        guard let textStorage = textContentStorage.textStorage else { return }
+        let filename = addAsset(data: data, suggestedExtension: fileExtension)
+        let ref = ImageRef(filename: filename, caption: "", isFigure: false)
+        guard let attachment = WriteImageAttachment(ref: ref, data: data) else { return }
+        attachment.bodyPointSize = styleStore.configuration.paragraph.fontSize
+
+        let nsText = textStorage.string as NSString
+        let caret = min(max(0, location ?? savedSelectedRange.location), nsText.length)
+
+        // Build the attachment character carrying .writeImage + a body block.
+        let attachmentString = NSMutableAttributedString(attachment: attachment)
+        attachmentString.addAttributes([
+            .writeBlockStyle: BlockStyle.body.rawValue,
+            .writeImage: ref.encodedJSON(),
+        ], range: NSRange(location: 0, length: attachmentString.length))
+
+        // Ensure the image sits in its own paragraph: prepend a newline unless
+        // the caret is already at the start of an (empty) paragraph, and append
+        // a trailing newline so following text starts fresh.
+        let fragment = NSMutableAttributedString()
+        let atParagraphStart = caret == 0 || nsText.character(at: caret - 1) == 0x0A
+        if !atParagraphStart {
+            fragment.append(NSAttributedString(
+                string: "\n", attributes: [.writeBlockStyle: BlockStyle.body.rawValue]
+            ))
+        }
+        fragment.append(attachmentString)
+        fragment.append(NSAttributedString(
+            string: "\n", attributes: [.writeBlockStyle: BlockStyle.body.rawValue]
+        ))
+
+        performCitationReplacement(
+            range: NSRange(location: caret, length: 0),
+            with: fragment,
+            actionName: "Insert Image"
+        )
+
+        // Place the caret on the line after the image.
+        let after = caret + fragment.length
+        applySelectionToTextView([NSRange(location: min(after, textStorage.length), length: 0)])
+        selectionDidChange(NSRange(location: min(after, textStorage.length), length: 0))
+    }
+
+    // MARK: - Image editing (popover)
+
+    /// The `ImageRef` stored on the image attachment at `range`, or nil.
+    func imageRef(at range: NSRange) -> ImageRef? {
+        guard let textStorage = textContentStorage.textStorage,
+              range.location < textStorage.length else { return nil }
+        return textStorage.imageRef(at: range.location)
+    }
+
+    /// Apply an edited caption / figure flag to the image at `range`: rewrite
+    /// its `.writeImage` JSON, rebuild the attachment so the caption re-renders,
+    /// restyle, serialize. Undo-aware.
+    func updateImage(at range: NSRange, caption: String, isFigure: Bool) {
+        guard let textStorage = textContentStorage.textStorage,
+              NSMaxRange(range) <= textStorage.length,
+              let existing = textStorage.imageRef(at: range.location) else { return }
+        let updated = ImageRef(
+            filename: existing.filename, caption: caption, isFigure: isFigure
+        )
+        guard updated != existing else { return }
+        guard let data = assets[updated.filename],
+              let attachment = WriteImageAttachment(ref: updated, data: data) else { return }
+        attachment.bodyPointSize = styleStore.configuration.paragraph.fontSize
+
+        var attrs = textStorage.attributes(at: range.location, effectiveRange: nil)
+        attrs[.writeImage] = updated.encodedJSON()
+        attrs[.attachment] = attachment
+        let replacement = NSAttributedString(string: "\u{FFFC}", attributes: attrs)
+        performCitationReplacement(range: range, with: replacement, actionName: "Edit Image")
+        invalidateLayout()
+    }
+
+    /// Remove the image attachment at `range`, deleting its character. The
+    /// underlying asset stays in the package (pruning is out of scope). Undo-aware.
+    func removeImage(at range: NSRange) {
+        guard let textStorage = textContentStorage.textStorage,
+              NSMaxRange(range) <= textStorage.length else { return }
+        performCitationReplacement(
+            range: range, with: NSAttributedString(string: ""), actionName: "Remove Image"
+        )
+    }
+
+    /// Force a layout refresh so re-rendered attachments redraw at their new size.
+    private func invalidateLayout() {
+        let full = textContentStorage.documentRange
+        textLayoutManager.invalidateLayout(for: full)
+        #if os(macOS)
+        nativeTextView?.needsDisplay = true
+        #else
+        nativeTextView?.setNeedsDisplay()
+        #endif
+    }
+
     // MARK: - Export
 
     func exportData(for format: ExportFormat) -> Data? {
@@ -662,7 +866,9 @@ final class EditorViewModel {
         let content = NSMutableAttributedString(attributedString: textStorage)
         switch format {
         case .pdf:
-            return PDFExporter(configuration: styleStore.configuration).pdfData(from: content)
+            return PDFExporter(
+                configuration: styleStore.configuration, assets: assets
+            ).pdfData(from: content)
         case .docx:
             let references = referenceStore.items.isEmpty ? nil : ReferenceExportContext(
                 items: referenceStore.items,
@@ -670,7 +876,8 @@ final class EditorViewModel {
             )
             return DocxExporter(
                 configuration: styleStore.configuration,
-                references: references
+                references: references,
+                assets: assets
             ).docxData(from: content)
         }
     }
@@ -818,12 +1025,15 @@ final class EditorViewModel {
         isResolvingCitation = true
         citationError = nil
         let tokenRange = token.range
+        let tokenText = token.text
         let input = token.input
         let resolver = MetadataResolver()
 
         Task { [weak self] in
             do {
-                let resolved = try await resolver.resolve(input)
+                // String-based resolution falls back from an embedded DOI to
+                // scraping the page itself when the registry lookup fails.
+                let resolved = try await resolver.resolve(string: tokenText)
                 await MainActor.run {
                     self?.finishCitation(resolved: resolved, input: input, tokenRange: tokenRange)
                 }
@@ -1101,6 +1311,28 @@ final class EditorViewModel {
             frame = frame.offsetBy(
                 dx: textView.textContainerInset.left,
                 dy: textView.textContainerInset.top
+            )
+        }
+        #endif
+        return frame
+    }
+
+    /// Like `viewRect(forCharacterRange:)` but in the visible viewport's
+    /// coordinate space (the space SwiftUI overlays cover). Use this for
+    /// popover anchors — document coordinates land offscreen once the
+    /// content is scrolled.
+    func viewportRect(forCharacterRange range: NSRange) -> CGRect? {
+        guard var frame = viewRect(forCharacterRange: range) else { return nil }
+        #if os(macOS)
+        if let clipView = nativeTextView?.enclosingScrollView?.contentView {
+            let scrollOrigin = clipView.bounds.origin
+            frame = frame.offsetBy(dx: -scrollOrigin.x, dy: -scrollOrigin.y)
+        }
+        #else
+        if let textView = nativeTextView {
+            frame = frame.offsetBy(
+                dx: -textView.contentOffset.x,
+                dy: -textView.contentOffset.y
             )
         }
         #endif

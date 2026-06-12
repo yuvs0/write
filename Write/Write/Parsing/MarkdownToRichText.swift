@@ -136,8 +136,17 @@ struct MarkdownToRichText {
                 // block style attribute covers the whole paragraph range.
                 let newline = NSMutableAttributedString(string: "\n")
                 if block.length > 0 {
+                    // The newline inherits the block's attributes so the block
+                    // style covers the whole paragraph — but it must never
+                    // carry run-scoped attributes like citations or images:
+                    // re-rendering such a run would swallow the newline and
+                    // merge the next paragraph into this one.
+                    var attributes = block.attributes(at: block.length - 1, effectiveRange: nil)
+                    attributes.removeValue(forKey: .writeCitation)
+                    attributes.removeValue(forKey: .writeImage)
+                    attributes.removeValue(forKey: .writeLink)
                     newline.setAttributes(
-                        block.attributes(at: block.length - 1, effectiveRange: nil),
+                        attributes,
                         range: NSRange(location: 0, length: 1)
                     )
                 } else {
@@ -358,9 +367,20 @@ struct MarkdownToRichText {
             state.htmlTraits = inner.htmlTraits
 
         case let image as Markdown.Image:
-            // Images aren't supported yet; keep the alt text visible.
             let alt = image.children.compactMap { ($0 as? Markdown.Text)?.string }.joined()
-            appendText(alt, to: result, blockStyle: blockStyle, state: state, context: &context)
+            // An image whose source lives in the package's `assets/` folder
+            // becomes an attachment character carrying `.writeImage`. The actual
+            // WriteImageAttachment is materialized later from the asset bytes;
+            // the parser stays pure (no Data, no rendering).
+            if let source = image.source, source.hasPrefix("assets/") {
+                let filename = String(source.dropFirst("assets/".count))
+                let isFigure = (image.title ?? "") == "figure"
+                let ref = ImageRef(filename: filename, caption: alt, isFigure: isFigure)
+                appendImageAttachment(ref, to: result, blockStyle: blockStyle, state: state)
+            } else {
+                // Legacy / foreign image paths degrade to their alt text.
+                appendText(alt, to: result, blockStyle: blockStyle, state: state, context: &context)
+            }
 
         case let html as InlineHTML:
             switch html.rawHTML.lowercased() {
@@ -473,6 +493,24 @@ struct MarkdownToRichText {
             attributes[.writeLink] = link
         }
         result.append(NSAttributedString(string: displayText, attributes: attributes))
+    }
+
+    /// Append an image attachment character carrying `.writeImage`. The parser
+    /// has no asset bytes, so no `NSTextAttachment` is created here — the editor
+    /// materializes the rendered attachment from the asset store after load.
+    private func appendImageAttachment(
+        _ ref: ImageRef,
+        to result: NSMutableAttributedString,
+        blockStyle: BlockStyle,
+        state: InlineState
+    ) {
+        let attributes: [NSAttributedString.Key: Any] = [
+            .writeBlockStyle: blockStyle.rawValue,
+            .writeImage: ref.encodedJSON(),
+        ]
+        // Images never carry inline traits or links; only the block style.
+        // U+FFFC OBJECT REPLACEMENT CHARACTER is the attachment placeholder.
+        result.append(NSAttributedString(string: "\u{FFFC}", attributes: attributes))
     }
 
     private func appendRun(

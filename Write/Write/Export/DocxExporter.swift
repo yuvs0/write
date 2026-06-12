@@ -16,10 +16,17 @@ struct DocxExporter {
     /// Optional reference context; when nil the export is identical to the
     /// pre-P3 behaviour (no customXml, no sdt).
     let references: ReferenceExportContext?
+    /// Image assets keyed by filename, embedded as `word/media/*` parts.
+    let assets: [String: Data]
 
-    init(configuration: StyleConfiguration, references: ReferenceExportContext? = nil) {
+    init(
+        configuration: StyleConfiguration,
+        references: ReferenceExportContext? = nil,
+        assets: [String: Data] = [:]
+    ) {
         self.configuration = configuration
         self.references = references
+        self.assets = assets
     }
 
     /// Exports normalize the body size to standard print sizing, scaling
@@ -34,6 +41,24 @@ struct DocxExporter {
     /// Numbered runs allocate fresh numbering instances starting here so
     /// each list restarts at 1.
     private static let firstDecimalNumId = 2
+
+    // MARK: - Media plan
+
+    /// One embedded image: its media filename, relationship id, content-type
+    /// extension, the (possibly transcoded) bytes, display extent in EMUs, and
+    /// the figure number when it's a numbered figure (0 otherwise).
+    private struct MediaImage {
+        let location: Int              // character location of the image run
+        let mediaFilename: String      // e.g. "image1.png"
+        let relationshipID: String     // e.g. "rId5"
+        let ext: String                // lowercased, e.g. "png"
+        let bytes: Data
+        let widthEMU: Int
+        let heightEMU: Int
+        let caption: String
+        let figureNumber: Int          // 0 = not a numbered figure
+        let docPrID: Int
+    }
 
     func docxData(from attributed: NSAttributedString) -> Data {
         // Collect all cited item IDs so we know which sources to include.
@@ -60,10 +85,18 @@ struct DocxExporter {
         let needsCustomXml = !citedItems.isEmpty
 
         // Accumulate external hyperlink relationships.
-        // rId1=styles, rId2=numbering, rId3=customXml (if present), rId4…=hyperlinks.
+        // rId1=styles, rId2=numbering, rId3=customXml (if present), then image
+        // relationships, then rId…=hyperlinks.
         var hyperlinkRels: [(id: String, url: String)] = []
         var hyperlinkRelsByURL: [String: String] = [:]
-        var nextHyperlinkIndex = needsCustomXml ? 4 : 3
+        var nextRelIndex = needsCustomXml ? 4 : 3
+
+        // Image pre-pass: assign media filenames, relationship ids, content
+        // types, figure numbers, and EMU extents (transcoding HEIC → PNG).
+        let mediaImages = planMedia(from: attributed, nextRelIndex: &nextRelIndex)
+        let mediaByRunIndex: [Int: MediaImage] = Dictionary(
+            uniqueKeysWithValues: mediaImages.map { ($0.location, $0) }
+        )
 
         // SDT id counter — negative to avoid collision with any Word-assigned ids.
         // -1 is reserved for the bibliography SDT; citations start at -2 downward.
@@ -72,24 +105,40 @@ struct DocxExporter {
         let (body, decimalListCount) = documentBody(
             from: attributed,
             tagByID: tagByID,
+            mediaByRunIndex: mediaByRunIndex,
             hyperlinkRels: &hyperlinkRels,
             hyperlinkRelsByURL: &hyperlinkRelsByURL,
-            nextHyperlinkIndex: &nextHyperlinkIndex,
+            nextHyperlinkIndex: &nextRelIndex,
             sdtIDCounter: &sdtIDCounter
         )
 
+        let hasImages = !mediaImages.isEmpty
+
         var archive = ZipArchive()
         archive.addFile(named: "[Content_Types].xml",
-                        data: Data(contentTypesXML(needsCustomXml: needsCustomXml).utf8))
+                        data: Data(contentTypesXML(
+                            needsCustomXml: needsCustomXml,
+                            imageExtensions: Set(mediaImages.map(\.ext))
+                        ).utf8))
         archive.addFile(named: "_rels/.rels", data: Data(relsXML.utf8))
         archive.addFile(named: "word/_rels/document.xml.rels",
-                        data: Data(documentRelsXML(needsCustomXml: needsCustomXml, hyperlinkRels: hyperlinkRels).utf8))
+                        data: Data(documentRelsXML(
+                            needsCustomXml: needsCustomXml,
+                            hyperlinkRels: hyperlinkRels,
+                            mediaImages: mediaImages
+                        ).utf8))
         archive.addFile(named: "word/document.xml", data: Data(documentXML(body: body).utf8))
-        archive.addFile(named: "word/styles.xml", data: Data(stylesXML.utf8))
+        archive.addFile(named: "word/styles.xml", data: Data(stylesXML(includeCaption: hasImages).utf8))
         archive.addFile(
             named: "word/numbering.xml",
             data: Data(numberingXML(decimalListCount: decimalListCount).utf8)
         )
+
+        // Embed image media parts, byte-identical to the (possibly transcoded)
+        // input. Originals are never modified in the package.
+        for image in mediaImages {
+            archive.addFile(named: "word/media/\(image.mediaFilename)", data: image.bytes)
+        }
 
         if needsCustomXml {
             let pkg = buildBibliographyPackage(
@@ -123,11 +172,95 @@ struct DocxExporter {
         return (citedIDs, hasBibliographyRegion)
     }
 
+    // MARK: - Media pre-pass
+
+    /// EMUs per inch (English Metric Units; the DrawingML measurement).
+    private static let emuPerInch = 914_400
+    /// Page text width in EMUs: 8.5in page − 1in margins each side = 6.5in.
+    private static let textWidthEMU = Int(6.5 * 914_400)
+
+    /// Walk every `.writeImage` run, decode each asset to size it, transcode
+    /// HEIC → PNG (originals stay untouched in the document package), assign a
+    /// media filename + relationship id + content-type extension, compute its
+    /// EMU extent scaled to the text width (preserving aspect), and number
+    /// figures in document order.
+    private func planMedia(
+        from attributed: NSAttributedString, nextRelIndex: inout Int
+    ) -> [MediaImage] {
+        let full = NSRange(location: 0, length: attributed.length)
+        var runs: [(location: Int, ref: ImageRef)] = []
+        attributed.enumerateAttribute(.writeImage, in: full, options: []) { value, range, _ in
+            guard let json = value as? String, let ref = json.decodedImageRef() else { return }
+            runs.append((range.location, ref))
+        }
+        guard !runs.isEmpty else { return [] }
+
+        var result: [MediaImage] = []
+        var imageCounter = 0
+        var figureCounter = 0
+        var docPrCounter = 1
+
+        for run in runs {
+            guard let originalData = assets[run.ref.filename] else { continue }
+            let originalExt = (run.ref.filename as NSString).pathExtension.lowercased()
+
+            // Decode for sizing; transcode HEIC/HEIF → PNG (Word can't read HEIC).
+            guard let decoded = DocxImageCodec.prepare(
+                data: originalData, ext: originalExt
+            ) else { continue }
+
+            imageCounter += 1
+            let mediaFilename = "image\(imageCounter).\(decoded.ext)"
+            let relationshipID = "rId\(nextRelIndex)"
+            nextRelIndex += 1
+
+            let (widthEMU, heightEMU) = emuExtent(
+                pixelWidth: decoded.pixelWidth, pixelHeight: decoded.pixelHeight
+            )
+
+            var figureNumber = 0
+            if run.ref.isFigure {
+                figureCounter += 1
+                figureNumber = figureCounter
+            }
+
+            result.append(MediaImage(
+                location: run.location,
+                mediaFilename: mediaFilename,
+                relationshipID: relationshipID,
+                ext: decoded.ext,
+                bytes: decoded.bytes,
+                widthEMU: widthEMU,
+                heightEMU: heightEMU,
+                caption: run.ref.caption,
+                figureNumber: figureNumber,
+                docPrID: docPrCounter
+            ))
+            docPrCounter += 1
+        }
+        return result
+    }
+
+    /// Display extent in EMUs scaled to fit the text width (never upscaling),
+    /// preserving aspect ratio.
+    private func emuExtent(pixelWidth: Int, pixelHeight: Int) -> (width: Int, height: Int) {
+        guard pixelWidth > 0, pixelHeight > 0 else {
+            return (Self.textWidthEMU, Self.textWidthEMU)
+        }
+        // Assume 96 dpi for the source so EMUs map sensibly, then clamp width.
+        let dpi = 96.0
+        let naturalWidthEMU = Double(pixelWidth) / dpi * Double(Self.emuPerInch)
+        let widthEMU = min(naturalWidthEMU, Double(Self.textWidthEMU))
+        let heightEMU = widthEMU * Double(pixelHeight) / Double(pixelWidth)
+        return (Int(widthEMU.rounded()), Int(heightEMU.rounded()))
+    }
+
     // MARK: - Body
 
     private func documentBody(
         from attributed: NSAttributedString,
         tagByID: [String: String],
+        mediaByRunIndex: [Int: MediaImage],
         hyperlinkRels: inout [(id: String, url: String)],
         hyperlinkRelsByURL: inout [String: String],
         nextHyperlinkIndex: inout Int,
@@ -229,6 +362,16 @@ struct DocxExporter {
                         nextHyperlinkIndex: &nextHyperlinkIndex
                     ))
                 }
+            } else if contentRange.length == 1,
+                      let media = mediaByRunIndex[contentRange.location],
+                      attributed.attribute(.writeImage, at: contentRange.location, effectiveRange: nil) is String {
+                // Image paragraph: an inline drawing, plus a Caption paragraph
+                // (with a SEQ Figure field) when it's a numbered figure.
+                flushBibliographySDT()
+                xml += imageParagraphXML(media)
+                if media.figureNumber > 0 {
+                    xml += captionParagraphXML(media)
+                }
             } else {
                 // Non-bibliography paragraph: flush any accumulated entries first.
                 flushBibliographySDT()
@@ -314,6 +457,65 @@ struct DocxExporter {
 
         let propertiesXML = properties.isEmpty ? "" : "<w:pPr>\(properties)</w:pPr>"
         return "<w:p>\(propertiesXML)\(runs)</w:p>"
+    }
+
+    // MARK: - Image paragraphs
+
+    /// An image paragraph: a centered paragraph containing a single inline
+    /// `w:drawing` whose blip references the media relationship, sized to the
+    /// computed EMU extent.
+    private func imageParagraphXML(_ media: MediaImage) -> String {
+        let docPrName = "Image \(media.docPrID)"
+        let drawing = """
+        <w:drawing>\
+        <wp:inline distT="0" distB="0" distL="0" distR="0">\
+        <wp:extent cx="\(media.widthEMU)" cy="\(media.heightEMU)"/>\
+        <wp:effectExtent l="0" t="0" r="0" b="0"/>\
+        <wp:docPr id="\(media.docPrID)" name="\(escapeXML(docPrName))"/>\
+        <wp:cNvGraphicFramePr>\
+        <a:graphicFrameLocks xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" noChangeAspect="1"/>\
+        </wp:cNvGraphicFramePr>\
+        <a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">\
+        <a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">\
+        <pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">\
+        <pic:nvPicPr>\
+        <pic:cNvPr id="\(media.docPrID)" name="\(escapeXML(media.mediaFilename))"/>\
+        <pic:cNvPicPr/>\
+        </pic:nvPicPr>\
+        <pic:blipFill>\
+        <a:blip r:embed="\(media.relationshipID)"/>\
+        <a:stretch><a:fillRect/></a:stretch>\
+        </pic:blipFill>\
+        <pic:spPr>\
+        <a:xfrm><a:off x="0" y="0"/><a:ext cx="\(media.widthEMU)" cy="\(media.heightEMU)"/></a:xfrm>\
+        <a:prstGeom prst="rect"><a:avLst/></a:prstGeom>\
+        </pic:spPr>\
+        </pic:pic>\
+        </a:graphicData>\
+        </a:graphic>\
+        </wp:inline>\
+        </w:drawing>
+        """
+        return "<w:p><w:pPr><w:jc w:val=\"center\"/></w:pPr><w:r>\(drawing)</w:r></w:p>"
+    }
+
+    /// A Caption-styled paragraph for a numbered figure:
+    /// "Figure " + SEQ Figure field (numeric result) + " — " + caption.
+    private func captionParagraphXML(_ media: MediaImage) -> String {
+        let seqField = "<w:r><w:fldChar w:fldCharType=\"begin\"/></w:r>"
+            + "<w:r><w:instrText xml:space=\"preserve\"> SEQ Figure \\* ARABIC </w:instrText></w:r>"
+            + "<w:r><w:fldChar w:fldCharType=\"separate\"/></w:r>"
+            + "<w:r><w:t>\(media.figureNumber)</w:t></w:r>"
+            + "<w:r><w:fldChar w:fldCharType=\"end\"/></w:r>"
+
+        let label = "<w:r><w:t xml:space=\"preserve\">Figure </w:t></w:r>"
+        let caption = media.caption.isEmpty
+            ? ""
+            : "<w:r><w:t xml:space=\"preserve\"> — \(escapeXML(media.caption))</w:t></w:r>"
+
+        return "<w:p><w:pPr><w:pStyle w:val=\"Caption\"/></w:pPr>"
+            + label + seqField + caption
+            + "</w:p>"
     }
 
     // MARK: - Citation SDT
@@ -491,7 +693,7 @@ struct DocxExporter {
 
     // MARK: - Package parts
 
-    private func contentTypesXML(needsCustomXml: Bool) -> String {
+    private func contentTypesXML(needsCustomXml: Bool, imageExtensions: Set<String>) -> String {
         var overrides = """
         <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
         <Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>
@@ -501,11 +703,26 @@ struct DocxExporter {
             overrides += "\n<Override PartName=\"/customXml/item1.xml\" ContentType=\"application/xml\"/>"
             overrides += "\n<Override PartName=\"/customXml/itemProps1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.customXmlProperties+xml\"/>"
         }
+
+        // Default content types per image extension present in the package.
+        let mimeByExt: [String: String] = [
+            "png": "image/png",
+            "jpeg": "image/jpeg",
+            "gif": "image/gif",
+            "tiff": "image/tiff",
+            "bmp": "image/bmp",
+        ]
+        var imageDefaults = ""
+        for ext in imageExtensions.sorted() {
+            let mime = mimeByExt[ext] ?? "image/\(ext)"
+            imageDefaults += "\n<Default Extension=\"\(ext)\" ContentType=\"\(mime)\"/>"
+        }
+
         return """
         <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
         <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
         <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
-        <Default Extension="xml" ContentType="application/xml"/>
+        <Default Extension="xml" ContentType="application/xml"/>\(imageDefaults)
         \(overrides)
         </Types>
         """
@@ -524,7 +741,8 @@ struct DocxExporter {
     /// these entries importers silently ignore styles.xml and numbering.xml.
     private func documentRelsXML(
         needsCustomXml: Bool,
-        hyperlinkRels: [(id: String, url: String)]
+        hyperlinkRels: [(id: String, url: String)],
+        mediaImages: [MediaImage]
     ) -> String {
         var rels = """
         <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -534,6 +752,9 @@ struct DocxExporter {
         """
         if needsCustomXml {
             rels += "\n<Relationship Id=\"rId3\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/customXml\" Target=\"../customXml/item1.xml\"/>"
+        }
+        for media in mediaImages {
+            rels += "\n<Relationship Id=\"\(media.relationshipID)\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/image\" Target=\"media/\(media.mediaFilename)\"/>"
         }
         for rel in hyperlinkRels {
             rels += "\n<Relationship Id=\"\(rel.id)\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink\" Target=\"\(escapeXML(rel.url))\" TargetMode=\"External\"/>"
@@ -545,13 +766,13 @@ struct DocxExporter {
     private func documentXML(body: String) -> String {
         """
         <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-        <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+        <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">
         <w:body>\(body)<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/></w:sectPr></w:body>
         </w:document>
         """
     }
 
-    private var stylesXML: String {
+    private func stylesXML(includeCaption: Bool) -> String {
         var styles = """
         <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
         <w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
@@ -573,8 +794,18 @@ struct DocxExporter {
         <w:style w:type="paragraph" w:styleId="Quote"><w:name w:val="Quote"/><w:basedOn w:val="Normal"/><w:qFormat/><w:pPr>\(spacingXML(for: configuration.blockquote))<w:ind w:left="720"/></w:pPr><w:rPr>\(runFontsXML(for: configuration.blockquote))\(configuration.blockquote.isItalic ? "<w:i/>" : "")<w:color w:val="595959"/></w:rPr></w:style>
         <w:style w:type="paragraph" w:styleId="CodeBlock"><w:name w:val="Code Block"/><w:basedOn w:val="Normal"/><w:pPr><w:shd w:val="clear" w:color="auto" w:fill="F2F2F2"/>\(spacingXML(for: configuration.code))</w:pPr><w:rPr>\(runFontsXML(for: configuration.code))</w:rPr></w:style>
         <w:style w:type="paragraph" w:styleId="ListParagraph"><w:name w:val="List Paragraph"/><w:basedOn w:val="Normal"/><w:qFormat/><w:pPr><w:ind w:left="720"/></w:pPr></w:style>
-        </w:styles>
         """
+
+        if includeCaption {
+            // Caption: basedOn Normal, 0.85× body size, italic, centered.
+            // Child order: name → basedOn → next → qFormat → pPr → rPr.
+            let halfPoints = Int((configuration.paragraph.fontSize * exportScale * 0.85 * 2).rounded())
+            styles += """
+            <w:style w:type="paragraph" w:styleId="Caption"><w:name w:val="caption"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:qFormat/><w:pPr>\(spacingXML(for: configuration.paragraph))<w:jc w:val="center"/></w:pPr><w:rPr><w:i/><w:sz w:val="\(halfPoints)"/><w:szCs w:val="\(halfPoints)"/></w:rPr></w:style>
+            """
+        }
+
+        styles += "</w:styles>"
         return styles
     }
 

@@ -1,6 +1,22 @@
 # Backlog
 
-## Recently shipped
+## Recently shipped (references & images release)
+- Reference manager inspector (⌃⌘4): paste DOI/URL/ISBN/arXiv to add sources,
+  Crossref bibliographic search fallback with pickable candidates, usage
+  badges, cited-at jump rows, per-document citation style (citeproc-js:
+  APA/Harvard/MLA/Chicago/IEEE/Vancouver)
+- Citation chips: ⌘↩ converts a link at the caret into a live citation,
+  click to edit page/chapter/section locator, atomic editing, undo-safe
+- Auto-regenerating references list (Format menu, at cursor or end)
+- Word-native DOCX export: b:Sources, CITATION/BIBLIOGRAPHY fields,
+  hyperlinks — Word's Manage Sources reads the document directly
+- Images: originals stored byte-for-byte in the package (never recompressed),
+  drag/drop/paste/Insert-menu/photo picker, captions with optional figure
+  numbering (computed in exports; DOCX uses native SEQ fields)
+- iPad layout fixes: single navigation bar, floating sidebar toggle,
+  menu-bar Text Styles, iPhone-only keyboard accessory bar
+
+## Previously shipped
 - WYSIWYG editing: markdown is storage-only; typed `*`/`#`/`` ` `` stay
   visible and formatting comes from the toolbar/menu/handle
 - Notion-style paragraph handle (hover, macOS + iPad pointer) for block styles

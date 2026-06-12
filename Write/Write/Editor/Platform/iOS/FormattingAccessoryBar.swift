@@ -58,11 +58,29 @@ private struct FormattingBarContent: View {
                 traitButton(
                     "chevron.left.forwardslash.chevron.right", "Code", .code
                 ) { viewModel.toggleInlineCode() }
+
+                Divider().frame(height: 20)
+
+                imageButton
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 6)
         }
         .frame(height: 48)
+    }
+
+    private var imageButton: some View {
+        Button {
+            viewModel.requestsPhotoPicker = true
+        } label: {
+            Image(systemName: "photo")
+                .font(.system(size: 15, weight: .medium))
+                .frame(width: 38, height: 34)
+                .foregroundStyle(Color.primary)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Insert Image")
     }
 
     private var styleMenu: some View {

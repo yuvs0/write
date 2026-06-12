@@ -26,6 +26,9 @@ struct ReferenceManagerView: View {
     @State private var deletionConfirmation: CSLItem?
     /// ID to flash briefly after a dedupe hit (briefly highlights the row).
     @State private var flashedItemID: String?
+    /// Crossref search results offered when input isn't a clean identifier
+    /// (or identifier resolution failed) — pick one to add it.
+    @State private var searchCandidates: [CSLItem] = []
 
     // MARK: - Body
 
@@ -60,7 +63,10 @@ struct ReferenceManagerView: View {
         } message: {
             Text("This source is cited in the document. Deleting it will leave its citation chips without a source.")
         }
-        .navigationTitle("References")
+        // No navigationTitle here: on iPadOS a title set inside inspector
+        // content bubbles up into the document window's rename control,
+        // making the FILE appear to be called "References". The iPhone
+        // sheet wrapper provides its own title.
     }
 
     // MARK: - Style picker header
@@ -133,44 +139,120 @@ struct ReferenceManagerView: View {
                     .font(.caption)
                     .foregroundStyle(.red)
             }
+
+            if !searchCandidates.isEmpty {
+                candidateList
+            }
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
     }
 
+    /// "Did you mean…" results from bibliographic search; tapping adds one.
+    private var candidateList: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text("Search results")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button {
+                    searchCandidates = []
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.tertiary)
+                }
+                .buttonStyle(.borderless)
+            }
+            ForEach(Array(searchCandidates.enumerated()), id: \.offset) { _, candidate in
+                Button {
+                    addCandidate(candidate)
+                } label: {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(candidate.title)
+                            .font(.caption.weight(.medium))
+                            .lineLimit(2)
+                            .multilineTextAlignment(.leading)
+                        Text(candidateSubtitle(candidate))
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(6)
+                    .background(
+                        RoundedRectangle(cornerRadius: 6)
+                            .fill(Color.accentColor.opacity(0.07))
+                    )
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+    }
+
+    private func candidateSubtitle(_ item: CSLItem) -> String {
+        var parts: [String] = [item.authorYearSummary]
+        if let container = item.containerTitle, !container.isEmpty {
+            parts.append(container)
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    private func addCandidate(_ candidate: CSLItem) {
+        if let doi = candidate.doi, let existing = viewModel.referenceStore.find(doi: doi) {
+            flashItem(existing.id)
+        } else if let url = candidate.url, let existing = viewModel.referenceStore.find(url: url) {
+            flashItem(existing.id)
+        } else {
+            viewModel.referenceStore.add(candidate)
+        }
+        searchCandidates = []
+        resolveError = nil
+        pasteInput = ""
+    }
+
     private func resolveInput() {
         let trimmed = pasteInput.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, let detected = MetadataResolver.detect(trimmed) else {
-            resolveError = "Could not detect a DOI, URL, ISBN, or arXiv identifier."
-            return
-        }
+        guard !trimmed.isEmpty else { return }
+
         resolveError = nil
+        searchCandidates = []
         isResolving = true
         let resolver = MetadataResolver()
+        let isIdentifier = MetadataResolver.detect(trimmed) != nil
+
         Task {
-            do {
-                let resolved = try await resolver.resolve(detected)
-                await MainActor.run {
-                    isResolving = false
-                    // Dedupe
-                    if let doi = resolved.doi, let existing = viewModel.referenceStore.find(doi: doi) {
-                        flashItem(existing.id)
-                        pasteInput = ""
-                        return
-                    }
-                    if let url = resolved.url, let existing = viewModel.referenceStore.find(url: url) {
-                        flashItem(existing.id)
-                        pasteInput = ""
-                        return
-                    }
-                    viewModel.referenceStore.add(resolved)
-                    pasteInput = ""
+            // Clean identifier: resolve directly. Anything else — or a failed
+            // identifier lookup — falls back to bibliographic search so the
+            // user can pick from candidates instead of hitting a dead end.
+            var resolved: CSLItem?
+            var failureReason: String?
+            if isIdentifier {
+                do {
+                    resolved = try await resolver.resolve(string: trimmed)
+                } catch {
+                    failureReason = (error as? LocalizedError)?.errorDescription
                 }
-            } catch {
+            }
+
+            if let resolved {
                 await MainActor.run {
                     isResolving = false
-                    resolveError = (error as? LocalizedError)?.errorDescription
-                        ?? "Could not retrieve metadata."
+                    addCandidate(resolved)
+                }
+                return
+            }
+
+            let candidates = (try? await resolver.searchCandidates(trimmed)) ?? []
+            await MainActor.run {
+                isResolving = false
+                searchCandidates = candidates
+                if candidates.isEmpty {
+                    resolveError = failureReason
+                        ?? MetadataResolver.detectionHint(trimmed)
+                } else if !isIdentifier {
+                    resolveError = nil
                 }
             }
         }
