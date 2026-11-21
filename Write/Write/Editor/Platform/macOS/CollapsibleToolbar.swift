@@ -3,45 +3,33 @@ import SwiftUI
 
 struct CollapsibleToolbar: View {
     @Bindable var viewModel: EditorViewModel
+    @Namespace private var toolbarNamespace
     @State private var isExpanded = false
-    @State private var buttonsWidth: CGFloat = 0
 
     var body: some View {
-        HStack(spacing: 0) {
-            formattingButtons
-                .fixedSize()
-                .frame(width: isExpanded ? buttonsWidth : 0, alignment: .leading)
-                .clipped()
-                .opacity(isExpanded ? 1 : 0)
-
-            Image(systemName: "textformat")
-                .font(.system(size: 12, weight: .medium))
-                .frame(width: isExpanded ? 0 : 28, height: 28)
-                .opacity(isExpanded ? 0 : 1)
-                .clipped()
+        GlassEffectContainer {
+            if isExpanded {
+                expandedContent
+            } else {
+                collapsedContent
+            }
         }
-        .padding(.horizontal, isExpanded ? 8 : 0)
-        .padding(.vertical, 4)
-        .glassEffect(.regular, in: .capsule)
-        .contentShape(Capsule())
         .onHover { hovering in
-            withAnimation(.spring(duration: 0.35, bounce: 0.12)) {
+            withAnimation(.bouncy) {
                 isExpanded = hovering
             }
         }
-        .background(
-            formattingButtons
-                .fixedSize()
-                .hidden()
-                .onGeometryChange(for: CGFloat.self) { proxy in
-                    proxy.size.width
-                } action: { width in
-                    buttonsWidth = width
-                }
-        )
     }
 
-    private var formattingButtons: some View {
+    private var collapsedContent: some View {
+        Text("Aa")
+            .font(.system(size: 14, weight: .medium, design: .serif))
+            .frame(width: 36, height: 36)
+            .glassEffect(.regular, in: .circle)
+            .glassEffectID("toolbar", in: toolbarNamespace)
+    }
+
+    private var expandedContent: some View {
         HStack(spacing: 4) {
             button("bold", "Bold (⌘B)", viewModel.toggleBold)
             button("italic", "Italic (⌘I)", viewModel.toggleItalic)
@@ -57,7 +45,10 @@ struct CollapsibleToolbar: View {
 
             button("chevron.left.forwardslash.chevron.right", "Inline Code", viewModel.toggleInlineCode)
         }
-        .padding(.horizontal, 4)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .glassEffect(.regular, in: .capsule)
+        .glassEffectID("toolbar", in: toolbarNamespace)
     }
 
     private func button(_ icon: String, _ tooltip: String, _ action: @escaping () -> Void) -> some View {

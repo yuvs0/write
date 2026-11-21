@@ -29,6 +29,8 @@ struct MacEditorView: NSViewRepresentable {
         textView.isAutomaticQuoteSubstitutionEnabled = false
         textView.isAutomaticDashSubstitutionEnabled = false
         textView.isAutomaticTextReplacementEnabled = false
+        textView.isContinuousSpellCheckingEnabled = true
+        textView.isAutomaticSpellingCorrectionEnabled = false
         textView.drawsBackground = false
         textView.textContainerInset = NSSize(width: 20, height: 20)
         textView.isVerticallyResizable = true

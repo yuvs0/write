@@ -13,7 +13,8 @@ struct IOSEditorView: UIViewRepresentable {
         textView.textContainerInset = UIEdgeInsets(top: 24, left: 16, bottom: 24, right: 16)
         textView.contentInsetAdjustmentBehavior = .automatic
         textView.font = UIFont.preferredFont(forTextStyle: .body)
-        textView.autocorrectionType = .default
+        textView.autocorrectionType = .no
+        textView.spellCheckingType = .yes
         textView.autocapitalizationType = .sentences
         textView.smartQuotesType = .no
         textView.smartDashesType = .no

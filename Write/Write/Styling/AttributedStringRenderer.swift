@@ -33,7 +33,8 @@ struct AttributedStringRenderer {
             guard range.location >= 0, NSMaxRange(range) <= totalLength, range.length > 0 else { continue }
             attributedString.addAttributes([
                 .font: hiddenFont,
-                .foregroundColor: NativeColor.clear
+                .foregroundColor: NativeColor.clear,
+                .languageIdentifier: "zxx"
             ], range: range)
         }
     }
@@ -73,7 +74,9 @@ struct AttributedStringRenderer {
 
         case .codeBlock(_, _, let range):
             guard NSMaxRange(range) <= len else { return }
-            attributedString.addAttributes(attributes(for: configuration.code), range: range)
+            var codeAttrs = attributes(for: configuration.code)
+            codeAttrs[.languageIdentifier] = "zxx"
+            attributedString.addAttributes(codeAttrs, range: range)
 
         case .listItem(_, let content, let range):
             guard NSMaxRange(range) <= len else { return }
@@ -143,7 +146,7 @@ struct AttributedStringRenderer {
                 size: baseStyle.fontSize * 0.9,
                 italic: false
             )
-            attributedString.addAttribute(.font, value: font, range: range)
+            attributedString.addAttributes([.font: font, .languageIdentifier: "zxx"], range: range)
 
         case .link(_, let children, let range):
             guard NSMaxRange(range) <= len else { return }
