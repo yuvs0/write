@@ -2,6 +2,10 @@ import Foundation
 
 @Observable
 final class StyleStore {
+    /// One store shared by every window, the settings UI, and exporters so
+    /// style edits apply everywhere immediately.
+    static let shared = StyleStore()
+
     private static let storageKey = "com.yuvrajsethia.write.styleConfiguration"
     private let defaults: UserDefaults
 

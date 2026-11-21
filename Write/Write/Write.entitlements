@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Outgoing connections for DOI/Crossref/arXiv/OpenLibrary metadata
+	     resolution. Merged with the sandbox entitlements Xcode generates
+	     from ENABLE_APP_SANDBOX / ENABLE_USER_SELECTED_FILES. -->
+	<key>com.apple.security.network.client</key>
+	<true/>
+</dict>
+</plist>
